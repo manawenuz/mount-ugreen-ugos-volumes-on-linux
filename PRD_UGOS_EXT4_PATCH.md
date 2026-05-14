@@ -1,105 +1,219 @@
-# Product Requirements Document (PRD): e2fsprogs Patch for UGOS Data Recovery
+# PRD: e2fsprogs Patch for UGOS Data Recovery
 
 ## 1. Objective
-Enable seamless data recovery and native mounting of UGREEN NASync (UGOS) ext4 storage volumes on standard Linux distributions, permanently bypassing the undocumented `0x20000000` (`FEATURE_I29`) incompat feature flag added by UGREEN.
+
+Enable native mounting of UGREEN NASync (UGOS) ext4 volumes on standard
+Linux distributions by teaching `e2fsprogs` about the undocumented
+`0x20000000` ext4 incompat feature flag UGREEN added to their kernel,
+and stripping it cleanly via `tune2fs`.
 
 ## 2. Background
-UGREEN modified the GPLv2 Linux kernel to include a proprietary, undocumented ext4 incompat feature flag (`0x20000000`). This flag prevents vanilla Linux kernels (e.g., Ubuntu, Debian) from mounting the volume. Previous workaround attempts, such as manually zeroing the bit using a hex editor, failed because it invalidates the `metadata_csum` (CRC32c) superblock checksum, causing `e2fsck` and the kernel to reject the mount. The current workaround requires spinning up a QEMU VM with the extracted UGOS kernel, which is highly complex and resource-intensive. 
 
-Since the proprietary `ugacl` kernel module fails to load but the volume still mounts and reads fine in the VM, we know the `0x20000000` flag does not fundamentally alter the on-disk data structures (inodes, extents, etc.). It acts solely as a software lock.
+UGOS ships a modified Linux 6.12.30+ kernel that sets an undocumented
+ext4 incompat feature flag at bit `0x20000000` on every volume it
+creates. Vanilla Linux kernels refuse to mount such volumes:
+
+```
+EXT4-fs (dm-X): Couldn't mount because of unsupported optional features (20000000)
+```
+
+Manual hex-edit of the superblock fails because ext4's `metadata_csum`
+(CRC32c) covers the feature flags. Clearing the bit invalidates the
+checksum, and the kernel rejects the mount with a checksum error
+instead.
+
+**Empirical observation** (from the QEMU recovery path):
+when the volume mounts under the UGOS kernel, the proprietary `ugacl`
+kernel module fails to load (`ugacl_vfs request_module failed`) yet the
+filesystem mounts and reads/writes correctly. This is strong evidence
+that bit `0x20000000` is purely a **provenance marker** — it does not
+alter on-disk layout (inodes, extents, htree, etc.). It is a software
+lock with no semantic on-disk effect.
 
 ## 3. Proposed Solution
-Modify the standard `e2fsprogs` (ext2/ext3/ext4 file system utilities) source code to recognize `0x20000000` as a supported incompat feature. 
 
-This enables two recovery paths:
-1. **Permanent Native Fix (`tune2fs`)**: Using the patched `tune2fs`, users can strip the incompat flag from the superblock (`tune2fs -O ^ugreen_acl`). Because `tune2fs` natively understands the ext4 structure, it will safely clear the bit, **automatically recalculate all CRC32c checksums**, and update all backup superblocks.
-2. **Read-Only Access (`fuse2fs`)**: Users who prefer not to alter the disk can use the patched `fuse2fs` to mount the partition read-only in userspace. 
+Patch `e2fsprogs` to accept `0x20000000` as a known incompat feature so
+`tune2fs` will operate on the volume and use its built-in ext4 routines
+to:
 
-## 4. Implementation Steps
+- Clear the bit from `s_feature_incompat`
+- Recalculate the CRC32c `s_checksum` on the superblock
+- Propagate the change to **every** backup superblock
 
-### 4.1 Clone `e2fsprogs`
-Clone the latest stable release of `e2fsprogs` from the official repository:
+After `tune2fs` finishes, the volume is standard ext4 and mounts on any
+vanilla kernel.
+
+Two recovery paths emerge from one patch:
+
+1. **Permanent fix** (`tune2fs -O ^ugreen_proprietary`): one-way
+   conversion to vanilla ext4.
+2. **Read-only access** (`fuse2fs -o ro`): userspace FUSE mount, never
+   writes to the source disk.
+
+## 4. Naming
+
+Use `ugreen_proprietary` (or equivalently `ugreen_incompat29`) — **not**
+`ugreen_acl`. The `ugacl` kernel module that UGOS ships is a separate
+component; we have no evidence that bit `0x20000000` semantically
+relates to ACLs. Honest naming prevents future confusion if the bit
+turns out to mean something else.
+
+## 5. Implementation
+
+### 5.1 Clone e2fsprogs
+
 ```bash
 git clone https://git.kernel.org/pub/scm/fs/ext2/e2fsprogs.git
 cd e2fsprogs
 ```
 
-### 4.2 Patch the Source Code
-Modify the following source files to teach `e2fsprogs` about the `0x20000000` flag. Let's refer to it as `EXT4_FEATURE_INCOMPAT_UGREEN`.
+### 5.2 Patch
 
-**File 1: `lib/ext2fs/ext2fs.h`**
-* Define the feature flag macro:
-  ```c
-  #define EXT4_FEATURE_INCOMPAT_UGREEN 0x20000000
-  ```
-* Add `EXT4_FEATURE_INCOMPAT_UGREEN` to the `EXT2_LIB_FEATURE_INCOMPAT_SUPP` macro.
+**`lib/ext2fs/ext2fs.h`** — add the feature macro and include it in the
+library's supported incompat mask:
 
-**File 2: `lib/e2p/feature.c`**
-* Add an entry for `EXT4_FEATURE_INCOMPAT_UGREEN` mapping to the string `"ugreen_acl"` in the feature table. This allows `tune2fs` to recognize the string argument.
+```c
+#define EXT4_FEATURE_INCOMPAT_UGREEN_PROPRIETARY 0x20000000
 
-### 4.3 Compile the Toolkit
-Run the standard build process:
+/* … existing EXT2_LIB_FEATURE_INCOMPAT_SUPP definition … */
+#define EXT2_LIB_FEATURE_INCOMPAT_SUPP \
+    ( /* existing flags */ | \
+      EXT4_FEATURE_INCOMPAT_UGREEN_PROPRIETARY )
+```
+
+**`lib/e2p/feature.c`** — add the bit-to-string mapping so users can
+reference it on the command line:
+
+```c
+{ EXT4_FEATURE_INCOMPAT_UGREEN_PROPRIETARY, "ugreen_proprietary" },
+```
+
+### 5.3 Build
+
 ```bash
 ./configure
 make -j$(nproc)
 ```
 
-### 4.4 Provide User Instructions
-Document the commands the user must execute to recover their volume.
+No `make install` — we run the patched binaries directly out of the
+build tree (`misc/tune2fs`, `misc/fuse2fs`) to avoid clobbering the
+distro's `e2fsprogs`.
 
-**To permanently fix the disk:**
-```bash
-./misc/tune2fs -O ^ugreen_acl /dev/mapper/<your-volume>
-```
-*Note: This makes the volume standard ext4 forever.*
+### 5.4 User commands
 
-**To perform a zero-touch read-only mount:**
+Permanent fix (one-way):
 ```bash
-./misc/fuse2fs -o ro /dev/mapper/<your-volume> /mnt/recovery
+./misc/tune2fs -O ^ugreen_proprietary /dev/mapper/<volume>
+mount /dev/mapper/<volume> /mnt/recovery   # any vanilla kernel
 ```
 
-## 5. Risk Mitigation & Safe Testing (Zero-Risk Validation)
-
-Before executing the patched `tune2fs` on the live data, we will validate the process on a perfect logical clone without risking a single byte of the original disk.
-
-### Option A: Device Mapper Copy-On-Write (COW) Overlay (Recommended)
-This method creates a virtual block device where all **reads** come from your real NAS disks, but all **writes** (such as the `tune2fs` modifications) are safely trapped in a temporary file in `/tmp`.
-
-1. Create a loopback file to hold our writes:
-   ```bash
-   truncate -s 1G /tmp/cow_writes.img
-   losetup /dev/loop99 /tmp/cow_writes.img
-   ```
-2. Get the exact sector size of the real volume:
-   ```bash
-   SIZE=$(blockdev --getsz /dev/mapper/ug_<your-vg-name>-volume1)
-   ```
-3. Create the virtual snapshot device:
-   ```bash
-   echo "0 $SIZE snapshot /dev/mapper/ug_<your-vg-name>-volume1 /dev/loop99 P 8" | dmsetup create ugos_safe_test
-   ```
-4. Run the patched `tune2fs` on the virtual device:
-   ```bash
-   ./misc/tune2fs -O ^ugreen_acl /dev/mapper/ugos_safe_test
-   ```
-5. Mount it natively and extract data safely:
-   ```bash
-   mount /dev/mapper/ugos_safe_test /mnt/recovery
-   ```
-*(When done, simply `dmsetup remove ugos_safe_test` and delete the `/tmp` file. The real disk remains 100% untouched).*
-
-### Option B: `e2image` Metadata Clone
-If we only want to test that the checksum recalculation and `e2fsck` pass cleanly, we can clone just the filesystem metadata (superblocks and inodes) into a sparse raw image, skipping the terabytes of actual file data:
+Read-only FUSE mount (no writes to source):
 ```bash
-e2image -r /dev/mapper/ug_<your-vg-name>-volume1 /tmp/fs_metadata.raw
-./misc/tune2fs -O ^ugreen_acl /tmp/fs_metadata.raw
-e2fsck -f /tmp/fs_metadata.raw
+mkdir -p /mnt/recovery
+./misc/fuse2fs -o ro /dev/mapper/<volume> /mnt/recovery
 ```
 
-## 6. Success Metrics
-* **No Corruption:** `tune2fs` executes successfully without invalidating `metadata_csum`, and `e2fsck` reports the filesystem is clean.
-* **Ease of Use:** The entire process takes less than 5 minutes for a competent Linux user, significantly faster than the current VM approach.
+## 6. Risk Mitigation: Validate on a COW Snapshot First
 
-## 6. Future Work
-* Create an automated bash script that downloads the `e2fsprogs` tarball, uses `sed` or patch files to apply the modifications automatically, runs `make`, and executes the `tune2fs` command.
-* Submit a formal write-up to the broader UGREEN recovery community.
+We validate the patch against a snapshot of the real device. Reads come
+from the real disk; writes are trapped in a temp file. Source is never
+modified.
+
+### Option A — dm-snapshot (recommended)
+
+Pre-conditions: the UGOS RAID/LVM is assembled on the host, i.e.
+`/dev/mapper/ug_*_pool*_volume1` exists as a block device (it exists at
+the *block* layer even though no kernel can *mount* its filesystem).
+
+```bash
+# 1. Backing file for COW writes (1G is plenty for tune2fs metadata changes)
+truncate -s 1G /tmp/cow_writes.img
+losetup /dev/loop99 /tmp/cow_writes.img
+
+# 2. Size of the real volume
+SIZE=$(blockdev --getsz /dev/mapper/ug_<vg-name>_pool1-volume1)
+
+# 3. Create the snapshot device
+#    chunk size 8 = 8 sectors = 4 KiB (matches ext4 block size)
+#    mode N = non-persistent (COW is destroyed when device is removed)
+echo "0 $SIZE snapshot /dev/mapper/ug_<vg-name>_pool1-volume1 /dev/loop99 N 8" \
+    | dmsetup create ugos_safe_test
+
+# 4. Run patched tune2fs against the snapshot
+./misc/tune2fs -O ^ugreen_proprietary /dev/mapper/ugos_safe_test
+
+# 5. fsck the snapshot to confirm clean filesystem
+./misc/e2fsck -fn /dev/mapper/ugos_safe_test
+
+# 6. Mount the snapshot with the vanilla host kernel — proves the fix
+mkdir -p /mnt/recovery_test
+mount /dev/mapper/ugos_safe_test /mnt/recovery_test
+ls /mnt/recovery_test
+umount /mnt/recovery_test
+
+# 7. Teardown — source disk is untouched
+dmsetup remove ugos_safe_test
+losetup -d /dev/loop99
+rm /tmp/cow_writes.img
+```
+
+If step 6 mounts cleanly and shows your data, you can confidently run
+the same `tune2fs -O ^ugreen_proprietary` on the **real** device.
+
+### Option B — e2image metadata clone
+
+A complement, not a replacement. Once the patched tools exist, this
+produces a small sparse file containing only filesystem metadata
+(superblocks, group descriptors, inode tables) for offline fsck
+verification. The file is small enough to back up before any
+destructive operation.
+
+```bash
+./misc/e2image -r /dev/mapper/ug_<vg-name>_pool1-volume1 /tmp/fs_metadata.raw
+./misc/tune2fs -O ^ugreen_proprietary /tmp/fs_metadata.raw
+./misc/e2fsck -f /tmp/fs_metadata.raw   # expect 0 errors
+```
+
+Note: `e2image` itself uses `libext2fs`, so this can only run *after*
+the patch is built. Don't expect it as a pre-build sanity check.
+
+## 7. Project Workflow (Recovery → Conversion)
+
+The patch is the *second* tool we apply, not the first. Critical data
+gets the proven path; the patch is then validated and used for the
+remaining volumes.
+
+| Phase | What | How |
+|---|---|---|
+| **A** | Recover pool1 (18TB RAID1) — high-value data | QEMU + UGOS kernel + rsync to freshly-formatted disk (see main README) |
+| **B** | Build & validate patched e2fsprogs | This document, Option A snapshot test against either pool |
+| **C** | Recover pool2 (2×1.8TB JBOD/linear) | Patched `tune2fs` directly on host — no VM needed |
+| **D** | Rebuild as vanilla ext4 + standard RAID1 / linear MD | `wipefs` → `mdadm --create` → `mkfs.ext4` → restore data |
+
+By Phase D every volume is standard Linux storage with no UGREEN
+proprietary bits anywhere on disk. Future kernel upgrades will mount it
+forever without any of this song and dance.
+
+## 8. Success Metrics
+
+- `tune2fs -O ^ugreen_proprietary` completes with exit code 0
+- `e2fsck -fn` reports a clean filesystem on the patched device
+- The patched device mounts on a vanilla host kernel (Ubuntu / Debian /
+  mainline 7.x) without `unsupported optional features (20000000)`
+- Source disk hash is identical before and after the snapshot test
+  (proves Option A's safety)
+- End-to-end pool2 recovery completes in under 5 minutes (vs. hours of
+  setup for the QEMU path)
+
+## 9. Future Work
+
+- Automate the entire flow as `recover.sh`: clones e2fsprogs, applies
+  the patch, builds, performs the dm-snapshot test, and prompts before
+  touching the real disk.
+- Submit the patch as a downstream/forked binary in the recovery repo.
+  Upstream `e2fsprogs` will not accept an undocumented vendor feature,
+  and rightly so.
+- File a GPL source-code request with UGREEN for their kernel
+  modifications. Their refusal to provide a bootable UGOS image,
+  combined with kernel patches whose source they do not publish, is
+  exactly the violation the GPL exists to prevent.
