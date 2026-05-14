@@ -219,10 +219,18 @@ Now your storage mounts natively on any Linux kernel forever.
 ## Notes and Gotchas
 
 - **The firmware `.img` is a TAR, not a disk image.** Do not `dd` it to a
-  block device — you'll wipe whatever's there. (Ask me how I know.)
-- **PIKVM mount of the `.img` as a flash drive doesn't boot it either** —
-  the file is a Clonezilla-style restore package handled by UGREEN's
-  `ugupdate` binary, not a bootable USB image.
+  block device — you'll wipe whatever's there. (Ask me how I know.) The
+  `.img` extension is misleading: `file release_*.img` reports
+  `POSIX tar archive (GNU)`.
+- **It is not a bootable USB image either.** Don't bother mounting it via
+  PIKVM as a virtual flash drive — the BIOS won't boot it. It's an OTA
+  upgrade payload meant to be unpacked by UGREEN's `ugupdate` binary on
+  an already-running UGOS system. UGREEN does **not** distribute a
+  bootable UGOS installer or ISO. This is almost certainly a deliberate
+  GPL loophole: as long as they only ship the software with the
+  appliance (and never "convey" it standalone), they argue they don't
+  owe the source code to anyone who didn't buy the hardware. Same
+  playbook some sketchy capture-card vendors used.
 - **Versions reported in `os-release`:** `Debian GNU/Linux 12 (bookworm)`,
   `OS_VERSION=1.15.1.0127`, kernel `6.12.30+`.
 - **The `ugacl_vfs request_module failed` warning** when you mount the
