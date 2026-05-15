@@ -7,7 +7,7 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 if [ "$#" -ne 1 ]; then
-    echo "Usage: $0 /dev/mapper/<your-ugos-volume>"
+    echo "Usage: $0 /dev/mapper/<your-ugreen_os-volume>"
     exit 1
 fi
 
@@ -29,7 +29,7 @@ fi
 
 if ! "$TUNE2FS" -l "$TARGET_DEV" 2>/dev/null | grep -q 'ugreen_proprietary'; then
     echo "Error: $TARGET_DEV does not have the ugreen_proprietary flag set."
-    echo "Either this is not a UGOS volume, or it has already been patched."
+    echo "Either this is not a UGREEN OS volume, or it has already been patched."
     exit 1
 fi
 
@@ -39,8 +39,8 @@ if df --type=tmpfs /tmp >/dev/null 2>&1; then
 else
     COW_DIR="/tmp"
 fi
-COW_IMG="$COW_DIR/ugos_cow_writes_$$.img"
-SNAP_NAME="ugos_safe_test_$$"
+COW_IMG="$COW_DIR/ugreen_os_cow_writes_$$.img"
+SNAP_NAME="ugreen_os_safe_test_$$"
 MOUNT_POINT="/mnt/recovery_test_$$"
 LOOP_DEV=""
 

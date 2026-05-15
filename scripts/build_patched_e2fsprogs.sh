@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build patched e2fsprogs that recognizes UGOS's 0x20000000 incompat flag.
+# Build patched e2fsprogs that recognizes UGREEN OS's 0x20000000 incompat flag.
 # Produces:
 #   ./build/e2fsprogs/misc/tune2fs   — strip the flag (one-way fix)
 #   ./build/e2fsprogs/misc/fuse2fs   — read-only userspace mount
@@ -51,7 +51,7 @@ echo "Patched files:"
 git diff --stat
 
 echo "=== [4/5] Configure & build ==="
-CFLAGS="-std=gnu99 -D_FILE_OFFSET_BITS=64" ./configure --prefix=/usr/local/e2fsprogs-ugos >"$BUILD_DIR/configure.log" 2>&1 || {
+CFLAGS="-std=gnu99 -D_FILE_OFFSET_BITS=64" ./configure --prefix=/usr/local/e2fsprogs-ugreen_os >"$BUILD_DIR/configure.log" 2>&1 || {
     echo "ERROR: configure failed. See $BUILD_DIR/configure.log" >&2
     tail -n 20 "$BUILD_DIR/configure.log" >&2
     exit 1

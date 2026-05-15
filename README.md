@@ -1,10 +1,10 @@
-# Escaping UGOS: Native UGREEN NAS Data Recovery for Standard Linux
+# Escaping UGREEN OS: Native UGREEN NAS Data Recovery for Standard Linux
 
-A practical guide to recovering data from UGREEN NASync devices (DXP4800 Plus, DXP6800 Pro, DXP8800, etc.) when you've replaced UGOS with a standard Linux distro (TrueNAS, Unraid, Debian, Ubuntu) — and discovered your existing UGOS-formatted ext4 volumes refuse to mount.
+A practical guide to recovering data from UGREEN NASync devices (DXP4800 Plus, DXP6800 Pro, DXP8800, etc.) when you've replaced UGREEN OS with a standard Linux distro (TrueNAS, Unraid, Debian, Ubuntu) — and discovered your existing UGREEN OS-formatted ext4 volumes refuse to mount.
 
 ## The Problem
 
-UGREEN's UGOS is Debian 12 + a custom Linux 6.12.30+ kernel that adds an **undocumented ext4 incompat feature flag** (`0x20000000`, reported by upstream `e2fsprogs` as `FEATURE_I29`). Any vanilla Linux kernel will refuse to mount volumes formatted by UGOS:
+UGREEN's UGREEN OS is Debian 12 + a custom Linux 6.12.30+ kernel that adds an **undocumented ext4 incompat feature flag** (`0x20000000`, reported by upstream `e2fsprogs` as `FEATURE_I29`). Any vanilla Linux kernel will refuse to mount volumes formatted by UGREEN OS:
 
 ```
 EXT4-fs (dm-X): Couldn't mount because of unsupported optional features (20000000)
@@ -38,8 +38,8 @@ We do not touch your real data immediately. Our `recover.sh` script utilizes Lin
 
 ### Step 1: Build the Patched Utilities
 ```bash
-git clone <this-repo> ugos-recovery
-cd ugos-recovery
+git clone <this-repo> ugreen_os-recovery
+cd ugreen_os-recovery
 sudo ./scripts/build_patched_e2fsprogs.sh
 ```
 

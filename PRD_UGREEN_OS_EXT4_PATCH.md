@@ -1,15 +1,15 @@
-# PRD: e2fsprogs Patch for UGOS Data Recovery
+# PRD: e2fsprogs Patch for UGREEN OS Data Recovery
 
 ## 1. Objective
 
-Enable native mounting of UGREEN NASync (UGOS) ext4 volumes on standard
+Enable native mounting of UGREEN NASync (UGREEN OS) ext4 volumes on standard
 Linux distributions by teaching `e2fsprogs` about the undocumented
 `0x20000000` ext4 incompat feature flag UGREEN added to their kernel,
 and stripping it cleanly via `tune2fs`.
 
 ## 2. Background
 
-UGOS ships a modified Linux 6.12.30+ kernel that sets an undocumented
+UGREEN OS ships a modified Linux 6.12.30+ kernel that sets an undocumented
 ext4 incompat feature flag at bit `0x20000000` on every volume it
 creates. Vanilla Linux kernels refuse to mount such volumes:
 
@@ -23,7 +23,7 @@ checksum, and the kernel rejects the mount with a checksum error
 instead.
 
 **Empirical observation** (from the QEMU recovery path):
-when the volume mounts under the UGOS kernel, the proprietary `ugacl`
+when the volume mounts under the UGREEN OS kernel, the proprietary `ugacl`
 kernel module fails to load (`ugacl_vfs request_module failed`) yet the
 filesystem mounts and reads/writes correctly. This is strong evidence
 that bit `0x20000000` is purely a **provenance marker** — it does not
@@ -53,7 +53,7 @@ Two recovery paths emerge from one patch:
 ## 4. Naming
 
 Use `ugreen_proprietary` (or equivalently `ugreen_incompat29`) — **not**
-`ugreen_acl`. The `ugacl` kernel module that UGOS ships is a separate
+`ugreen_acl`. The `ugacl` kernel module that UGREEN OS ships is a separate
 component; we have no evidence that bit `0x20000000` semantically
 relates to ACLs. Honest naming prevents future confusion if the bit
 turns out to mean something else.
@@ -73,7 +73,7 @@ This script uses the patch in `patches/0001-Recognize-ugreen_proprietary-incompa
 
 **`lib/ext2fs/ext2_fs.h`** — Defines the feature flag:
 ```c
-#define EXT4_FEATURE_INCOMPAT_UGREEN_PROPRIETARY 0x20000000 /* UGOS marker */
+#define EXT4_FEATURE_INCOMPAT_UGREEN_PROPRIETARY 0x20000000 /* UGREEN OS marker */
 ```
 
 **`lib/ext2fs/ext2fs.h`** — Includes the flag in the library's supported incompat mask:
@@ -124,7 +124,7 @@ This script will automatically set up the snapshot, run the patched tools, mount
 
 **Manual Method (What the script does under the hood):**
 
-Pre-conditions: the UGOS RAID/LVM is assembled on the host, i.e.
+Pre-conditions: the UGREEN OS RAID/LVM is assembled on the host, i.e.
 `/dev/mapper/ug_*_pool*_volume1` exists as a block device (it exists at
 the *block* layer even though no kernel can *mount* its filesystem).
 
@@ -140,22 +140,22 @@ SIZE=$(blockdev --getsz /dev/mapper/ug_<vg-name>_pool1-volume1)
 #    chunk size 8 = 8 sectors = 4 KiB (matches ext4 block size)
 #    mode N = non-persistent (COW is destroyed when device is removed)
 echo "0 $SIZE snapshot /dev/mapper/ug_<vg-name>_pool1-volume1 /dev/loop99 N 8" \
-    | dmsetup create ugos_safe_test
+    | dmsetup create ugreen_os_safe_test
 
 # 4. Run patched tune2fs against the snapshot
-./misc/tune2fs -O ^ugreen_proprietary /dev/mapper/ugos_safe_test
+./misc/tune2fs -O ^ugreen_proprietary /dev/mapper/ugreen_os_safe_test
 
 # 5. fsck the snapshot to confirm clean filesystem
-./misc/e2fsck -fn /dev/mapper/ugos_safe_test
+./misc/e2fsck -fn /dev/mapper/ugreen_os_safe_test
 
 # 6. Mount the snapshot with the vanilla host kernel — proves the fix
 mkdir -p /mnt/recovery_test
-mount /dev/mapper/ugos_safe_test /mnt/recovery_test
+mount /dev/mapper/ugreen_os_safe_test /mnt/recovery_test
 ls /mnt/recovery_test
 umount /mnt/recovery_test
 
 # 7. Teardown — source disk is untouched
-dmsetup remove ugos_safe_test
+dmsetup remove ugreen_os_safe_test
 losetup -d /dev/loop99
 rm /tmp/cow_writes.img
 ```
@@ -188,7 +188,7 @@ remaining volumes.
 
 | Phase | What | How |
 |---|---|---|
-| **A** | Recover pool1 (18TB RAID1) — high-value data | QEMU + UGOS kernel + rsync to freshly-formatted disk (see main README) |
+| **A** | Recover pool1 (18TB RAID1) — high-value data | QEMU + UGREEN OS kernel + rsync to freshly-formatted disk (see main README) |
 | **B** | Build & validate patched e2fsprogs | This document, Option A snapshot test against either pool |
 | **C** | Recover pool2 (2×1.8TB JBOD/linear) | Patched `tune2fs` directly on host — no VM needed |
 | **D** | Rebuild as vanilla ext4 + standard RAID1 / linear MD | `wipefs` → `mdadm --create` → `mkfs.ext4` → restore data |
@@ -213,6 +213,6 @@ forever without any of this song and dance.
   Upstream `e2fsprogs` will not accept an undocumented vendor feature,
   and rightly so.
 - File a GPL source-code request with UGREEN for their kernel
-  modifications. Their refusal to provide a bootable UGOS image,
+  modifications. Their refusal to provide a bootable UGREEN OS image,
   combined with kernel patches whose source they do not publish, is
   exactly the violation the GPL exists to prevent.

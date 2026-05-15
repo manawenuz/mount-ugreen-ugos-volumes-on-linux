@@ -1,10 +1,10 @@
-From: UGOS Recovery <none@example.com>
+From: UGREEN OS Recovery <none@example.com>
 Subject: [PATCH] Recognize ugreen_proprietary (0x20000000) ext4 incompat feature
 
-UGREEN's UGOS sets an undocumented ext4 incompat feature flag at bit
+UGREEN's UGREEN OS sets an undocumented ext4 incompat feature flag at bit
 0x20000000 on every volume it creates. This flag has no observable
 on-disk effect (filesystems mount and read/write correctly under the
-UGOS kernel even when the proprietary ugacl module fails to load),
+UGREEN OS kernel even when the proprietary ugacl module fails to load),
 but it prevents mounting on standard Linux kernels.
 
 Teach e2fsprogs to recognize the flag as a known feature so tune2fs
@@ -41,7 +41,7 @@ diff --git a/lib/ext2fs/ext2_fs.h b/lib/ext2fs/ext2_fs.h
  #define EXT4_FEATURE_INCOMPAT_INLINE_DATA	0x8000 /* data in inode */
  #define EXT4_FEATURE_INCOMPAT_ENCRYPT		0x10000
  #define EXT4_FEATURE_INCOMPAT_CASEFOLD		0x20000
-+#define EXT4_FEATURE_INCOMPAT_UGREEN_PROPRIETARY 0x20000000 /* UGOS marker */
++#define EXT4_FEATURE_INCOMPAT_UGREEN_PROPRIETARY 0x20000000 /* UGREEN OS marker */
 
  #define EXT4_FEATURE_COMPAT_FUNCS(name, ver, flagname) \
  static inline int ext2fs_has_feature_##name(struct ext2_super_block *sb) \
