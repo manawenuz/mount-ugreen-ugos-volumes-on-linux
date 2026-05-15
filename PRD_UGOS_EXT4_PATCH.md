@@ -112,6 +112,14 @@ modified.
 
 ### Option A — dm-snapshot (recommended)
 
+**Automated Method:** We have wrapped this entire safety flow into an interactive script:
+```bash
+sudo ./scripts/recover.sh /dev/mapper/ug_<vg-name>_pool1-volume1
+```
+This script will automatically set up the snapshot, run the patched tools, mount it for you to inspect, and safely tear it down when you're done. If the test is successful, it will ask for permission to permanently apply the fix to the real disk.
+
+**Manual Method (What the script does under the hood):**
+
 Pre-conditions: the UGOS RAID/LVM is assembled on the host, i.e.
 `/dev/mapper/ug_*_pool*_volume1` exists as a block device (it exists at
 the *block* layer even though no kernel can *mount* its filesystem).
@@ -197,8 +205,6 @@ forever without any of this song and dance.
   setup for the QEMU path)
 
 ## 9. Future Work
-
-- Expand `scripts/build_patched_e2fsprogs.sh` into a fully automated `recover.sh` that also performs the dm-snapshot test and prompts before touching the real disk.
 - Submit the patch as a downstream/forked binary in the recovery repo.
   Upstream `e2fsprogs` will not accept an undocumented vendor feature,
   and rightly so.
