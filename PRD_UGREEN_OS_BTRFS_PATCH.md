@@ -1,0 +1,58 @@
+# Product Requirements Document: UGREEN OS BTRFS Native Recovery
+
+## 1. Problem Statement
+UGREEN OS on newer models (e.g., DXP6800 Pro Founder Edition) utilizes `btrfs` instead of `ext4` for primary storage pools. Similar to their ext4 implementation, UGREEN has injected a proprietary "incompatible feature" flag into the BTRFS superblock to enforce vendor lock-in and prevent standard Linux distributions (TrueNAS, Unraid, mainline Debian) from mounting the arrays.
+
+Specifically, UGREEN tools set **Bit 62** (`0x4000000000000000`) in the BTRFS `incompat_flags` field (offset `0x128`). Their internal patched `btrfs-progs` decodes this bit as `ugacl`.
+
+When a standard Linux kernel attempts to mount the array, it encounters this unknown incompat flag and immediately aborts the mount to prevent accidental data corruption.
+
+## 2. Technical Context: BTRFS Superblocks
+Unlike ext4, which scatters checksummed metadata extensively throughout block groups, BTRFS has a highly predictable and self-contained superblock structure.
+
+*   **Locations:** Superblocks are strictly mirrored at physical block device offsets: `64KiB`, `64MiB`, `256GiB`, and `1TiB`.
+*   **Size:** Each superblock is `4KiB` (4096 bytes).
+*   **Magic Signature:** `_BHRfS_M` at offset `0x40`.
+*   **Incompat Flags:** 8 bytes at offset `0x128`.
+*   **Checksum:** The first 32 bytes (`0x00` to `0x1F`) of the superblock contain a hash (typically CRC32C) covering the remainder of the 4KiB block (`0x20` through `0xFFF`).
+
+Any bitwise modification to `incompat_flags` will invalidate the checksum, preventing the kernel from recognizing the superblock. Therefore, a raw hex-edit is insufficient.
+
+## 3. Proposed Solution Architecture
+Instead of patching and compiling the massive `btrfs-progs` C codebase, the most robust and maintainable approach is a **standalone Python script**. Python's standard library can easily parse binary structs, execute bitwise masking, and recalculate CRC32C hashes without any external dependencies.
+
+### 3.1 Core Utility: `patch_btrfs_ugos.py`
+A CLI tool designed to directly manipulate the BTRFS superblocks on a target block device.
+
+**Execution Flow:**
+1.  **Backup Mechanism:** Read the 4KiB superblocks from all valid offset locations and write them to a local binary file (e.g., `btrfs_sb_backup_<timestamp>.bin`). This guarantees a non-destructive rollback path.
+2.  **Validation:** Verify the `_BHRfS_M` magic string to ensure the target is actually a BTRFS filesystem.
+3.  **Read Flags:** Read the 8-byte integer at `0x128`. Verify that Bit 62 (`0x4000000000000000`) is currently set.
+4.  **Patch Flags:** Apply a bitwise AND mask (`~0x4000000000000000`) to clear the `ugacl` bit.
+5.  **Recalculate Checksum:** Zero out the first 32 bytes, calculate the CRC32C hash over bytes `0x20` to `0xFFF`, and write the 4-byte digest back to `0x00`.
+6.  **Commit:** Write the patched 4KiB block back to the exact physical offset on the device. Repeat for all superblock mirrors.
+
+### 3.2 Safety Wrapper: `recover_btrfs.sh`
+Following the exact safety paradigm established for the EXT4 fix, we will never test the patch on live user data.
+
+**Execution Flow:**
+1.  Use `dmsetup` to create a Copy-On-Write (COW) snapshot overlay of the target BTRFS block device, redirecting all writes to a temporary file in `/var/tmp`.
+2.  Execute `patch_btrfs_ugos.py` strictly against the virtual `dm-snapshot` device.
+3.  Mount the virtual device (`mount /dev/mapper/ugos_safe_test /mnt/recovery_test`).
+4.  Pause and allow the user to mathematically verify their files.
+5.  Tear down the temporary snapshot, destroying the test writes.
+6.  Require explicit user confirmation (`[y/N]`) before executing the Python script against the real, physical block device.
+
+## 4. Rollback Strategy
+If the user executes the permanent patch but experiences unexpected filesystem behavior, they can restore the original proprietary superblocks:
+```bash
+dd if=btrfs_sb_backup.bin of=/dev/<device> bs=4K count=1 seek=16    # 64KiB
+dd if=btrfs_sb_backup.bin of=/dev/<device> bs=4K count=1 seek=16384 # 64MiB
+# ... etc ...
+```
+
+## 5. Phased Implementation Plan
+*   **Phase 1:** Draft the Python `patch_btrfs_ugos.py` utility. Implement the CRC32C recalculation and automated binary backups.
+*   **Phase 2:** Draft the `recover_btrfs.sh` Device Mapper safety wrapper.
+*   **Phase 3:** User Validation. The user will execute the COW test against their live DXP6800 Pro array to confirm successful mounting.
+*   **Phase 4:** Commit to `main` and finalize documentation for BTRFS users.
