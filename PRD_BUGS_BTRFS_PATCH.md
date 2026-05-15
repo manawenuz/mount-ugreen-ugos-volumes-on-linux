@@ -33,26 +33,28 @@ A series of critical defects have been identified in the BTRFS patching toolchai
 ### BUG-009: Misleading `OFF_BYTENR` Constant (RESOLVED)
 *   **Status:** FIXED. Constants renamed to `OFF_BYTENR` (0x30) and `OFF_CSUM_DATA_START` (0x20).
 
-### BUG-010: No verification of existing superblock CRC32C before patching (RESOLVED)
-*   **Status:** FIXED. `find_valid_superblocks` now verifies the stored CRC32C against the body before accepting a mirror. CRC mismatch is treated as a hard abort. The same check surfaces in `--check` and `--dump` modes.
-*   **Impact:** Prevents masking pre-existing silent corruption (bit rot, aborted writes) with a freshly valid CRC.
+## 3. Round 2 Audit Findings
 
-### BUG-011: `COW_DIR` user override silently discarded when `/tmp` is not tmpfs (RESOLVED)
-*   **Status:** FIXED. `recover_btrfs.sh` now only applies the tmpfs heuristic when `COW_DIR` was not explicitly provided by the caller.
-*   **Impact:** User-exported `COW_DIR=/some/path` is now always honored.
+### BUG-010: Missing Existing CRC Verification (RESOLVED)
+*   **Status:** FIXED. Tool now verifies the existing superblock CRC before patching to avoid masking pre-existing bit rot or corruption.
+*   **Impact:** Prevents masking pre-existing silent corruption with a freshly valid CRC.
 
-### BUG-012: Superblock backups written to current working directory (RESOLVED)
-*   **Status:** FIXED. Added `--backup-dir DIR` argument. Before writing, the tool uses `findmnt` to verify the backup directory is not on the same underlying block device as the target. If the check detects a collision, it aborts with a clear remediation hint.
-*   **Impact:** Eliminates the risk of writing the only rollback artefact onto the device being mutated.
+### BUG-011: `COW_DIR` Logic Clashing (RESOLVED)
+*   **Status:** FIXED. `recover_btrfs.sh` now respects user-provided `COW_DIR` and only applies tmpfs heuristics when the variable is unset.
+*   **Impact:** User-exported `COW_DIR` is now always honored.
 
-### BUG-013: Pre-flight requires UGREEN flag on *every* mirror, preventing resume after partial patch (RESOLVED)
-*   **Status:** FIXED. The patcher now classifies each mirror as `needs_patch`, `already_clean`, or `error`. Runs are permitted when all mirrors are either `needs_patch` or `already_clean`, with at least one `needs_patch`. Already-clean mirrors are skipped during writes. `--check` exits with code 2 for the mixed state so operators know a resume is possible.
-*   **Impact:** Interrupted runs can now be resumed safely without manual intervention.
+### BUG-012: Insecure Backup Location (RESOLVED)
+*   **Status:** FIXED. Added `--backup-dir` argument and implemented a cross-device check to prevent writing backups to the same physical disk being mutated.
+*   **Impact:** Eliminates the risk of writing the rollback artefact onto the device being mutated.
 
-### BUG-014: Partial-write crash window across mirrors is undocumented (RESOLVED)
-*   **Status:** FIXED. Added a "Crash Safety" subsection to `BTRFS_TESTING.md` describing the window, the kernel's mirror-selection behaviour, and the resume procedure introduced in BUG-013.
+### BUG-013: Rigid Partial-Patch Abort (RESOLVED)
+*   **Status:** FIXED. Tool now supports a "resume" state, allowing it to skip already-clean mirrors and patch only the remaining ones.
+*   **Impact:** Interrupted runs can now be resumed safely.
+
+### BUG-014: Crash Safety Documentation (RESOLVED)
+*   **Status:** FIXED. `BTRFS_TESTING.md` now includes a comprehensive section on partial-patch behavior and recovery.
 *   **Impact:** Operators now understand the risk and the remediation path.
 
-### BUG-015: 1 GiB COW image may overflow during inspection (RESOLVED)
-*   **Status:** FIXED. Default COW size bumped to 4 GiB. Mount step now uses `-o noatime,nodiratime`. `COW_SIZE` exposed as an environment override alongside `COW_DIR`.
+### BUG-015: COW Snapshot Overrun (RESOLVED)
+*   **Status:** FIXED. Default COW size bumped to 4GB, and verification mount now uses `noatime,nodiratime` to minimize write churn.
 *   **Impact:** Long inspection sessions no longer risk COW exhaustion.
