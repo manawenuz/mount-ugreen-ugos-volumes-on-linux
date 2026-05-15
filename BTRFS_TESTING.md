@@ -1,0 +1,285 @@
+# BTRFS Recovery Tool — Volunteer Testing Guide
+
+> **⚠️ CRITICAL SAFETY RULE:** Under no circumstances should you run the patching tool directly against your real disk during this test phase. All testing must be **read-only** or use the provided COW-snapshot safety wrapper. Your data is irreplaceable.
+
+---
+
+## What We Need From You
+
+We need a volunteer with a UGREEN NAS device formatted with **BTRFS** (not ext4) who can run a series of safe, non-destructive commands and share the output. **One complete run is enough** — if you capture everything listed below, we will not need to ask you to run anything again.
+
+---
+
+## Step 0: Prerequisites
+
+1. A standard Linux distribution booted on your NAS (TrueNAS, Unraid, Debian, Ubuntu, etc.).
+2. Root/sudo access.
+3. Your UGREEN OS BTRFS volume assembled at the block layer (e.g., `/dev/mapper/ug_*_pool*-volume1`). It should exist as a block device even if it refuses to mount.
+4. Python 3 installed (`python3 --version`).
+5. `dmsetup`, `losetup`, and standard mount tools available.
+
+---
+
+## Step 1: Clone the Repository
+
+```bash
+cd ~
+git clone -b feature/btrfs-support <this-repo-url> ugreen_btrfs_test
+cd ugreen_btrfs_test
+```
+
+---
+
+## Step 2: Identify Your Target Device
+
+List your block devices and find the UGREEN BTRFS volume:
+
+```bash
+ls -la /dev/mapper/ug_* 2>/dev/null || echo "No /dev/mapper/ug_* devices found"
+lsblk -f
+sudo blkid | grep -i btrfs
+```
+
+**Copy the full path** of your BTRFS volume (e.g., `/dev/mapper/ug_A5AEB6_1767706191_pool1-volume1`). We will refer to this as `<TARGET>` below.
+
+**Do NOT substitute `<TARGET>` literally — always use your actual device path.**
+
+---
+
+## Step 3: Read-Only Pre-Flight Checks (100% Safe)
+
+These commands only **read** from your disk. They will never modify anything.
+
+Run each command and **save the complete output** to a text file.
+
+### 3.1 Verify the volume is assembled
+
+```bash
+sudo file -s <TARGET>
+sudo blkid <TARGET>
+```
+
+### 3.2 Capture kernel rejection messages
+
+If you have already tried (and failed) to mount the volume, the kernel log contains the exact error:
+
+```bash
+sudo dmesg | grep -i btrfs | tail -n 50
+```
+
+If the volume is not mounted, try a read-only mount attempt to trigger the error:
+
+```bash
+sudo mkdir -p /mnt/ugreen_test_mount
+sudo mount -o ro <TARGET> /mnt/ugreen_test_mount 2>&1 || true
+sudo dmesg | grep -i btrfs | tail -n 20
+```
+
+### 3.3 Run the Python tool in `--check` mode (read-only)
+
+```bash
+sudo ./scripts/patch_btrfs_ugos.py --check <TARGET>
+```
+
+**Expected success output:**
+```
+Found N valid BTRFS superblock mirror(s):
+  - 0x00010000 (65536 bytes, 64.0 KiB)
+  ...
+Check passed: all mirrors are valid BTRFS with:
+  - bytenr matches physical offset
+  - csum_type = CRC32C (0)
+  - UGREEN proprietary flag (0x4000000000000000) is present
+```
+
+If you see **errors** here (e.g., "bytenr mismatch", "unsupported csum_type"), **stop immediately** and send us the output. Do not proceed.
+
+### 3.4 Dump superblocks for offline analysis (read-only)
+
+```bash
+sudo ./scripts/patch_btrfs_ugos.py --dump <TARGET>
+```
+
+This creates timestamped `btrfs_sb_backup_<device>_offset_<hex>_<timestamp>.bin` files in your current directory. These are exact 4 KiB copies of each superblock mirror. **Keep these files** — they are your insurance policy.
+
+List them:
+
+```bash
+ls -la btrfs_sb_backup_*.bin
+sha256sum btrfs_sb_backup_*.bin
+```
+
+### 3.5 Inspect superblock flags with xxd/hexdump (optional but helpful)
+
+```bash
+xxd -l 256 -g 1 btrfs_sb_backup_<device>_offset_00010000_*.bin | head -20
+```
+
+Or inspect the incompat_flags field directly (offset 0xBC = 188 decimal):
+
+```bash
+python3 -c "
+import sys
+with open(sys.argv[1], 'rb') as f:
+    f.seek(0xBC)
+    flags = int.from_bytes(f.read(8), 'little')
+    print(f'incompat_flags = 0x{flags:016X}')
+    ugreen = 0x4000000000000000
+    print(f'UGREEN bit (0x{ugreen:016X}) set: {bool(flags & ugreen)}')
+" btrfs_sb_backup_<device>_offset_00010000_*.bin
+```
+
+---
+
+## Step 4: COW Snapshot Test (Still 100% Safe)
+
+This step tests the actual patching logic, but **all writes are trapped in a temporary RAM/disk file**. Your original volume is never modified.
+
+### 4.1 Run the safety wrapper
+
+```bash
+sudo ./scripts/recover_btrfs.sh <TARGET>
+```
+
+The script will:
+1. Verify the UGREEN flag exists (read-only).
+2. Create a dm-snapshot COW overlay.
+3. Patch the **snapshot only**.
+4. Mount the patched snapshot for you to inspect.
+5. Tear down the snapshot (destroying all test writes).
+
+### 4.2 During the mounted phase
+
+When the script pauses with the message:
+
+```
+SUCCESS! The patched volume is mounted at: /mnt/recovery_btrfs_test_...
+```
+
+Open a **second terminal** and verify your data:
+
+```bash
+# List the root of the mounted test volume
+ls -la /mnt/recovery_btrfs_test_*/
+
+# Check a few files
+head -c 100 /mnt/recovery_btrfs_test_*/some-file-you-recognize
+
+# Optional: verify file hashes against a known backup
+# sha256sum /mnt/recovery_btrfs_test_*/path/to/important/file
+```
+
+Press `[Enter]` in the first terminal when you are satisfied.
+
+### 4.3 After teardown
+
+The script will ask:
+
+```
+Did the test succeed? Are you ready to permanently patch <TARGET>? (y/N)
+```
+
+**Type `N` and press Enter.** We are only testing. Do NOT permanently patch during this volunteer test unless explicitly instructed.
+
+---
+
+## Step 5: Gather ALL Logs (This Is the Most Important Step)
+
+We need everything in one place. Run the following commands and **copy the entire output into a text file** (or redirect with `>`):
+
+```bash
+# Create a single report file
+REPORT="btrfs_test_report_$(date +%Y%m%d_%H%M%S).txt"
+exec > >(tee -a "$REPORT") 2>&1
+
+echo "===== UGREEN BTRFS Test Report ====="
+echo "Date: $(date)"
+echo "Host: $(hostname)"
+echo "Kernel: $(uname -a)"
+echo "Python: $(python3 --version)"
+echo ""
+
+echo "===== Target Device ====="
+ls -la <TARGET>
+file -s <TARGET>
+blkid <TARGET>
+echo ""
+
+echo "===== BTRFS Kernel Messages ====="
+dmesg | grep -i btrfs | tail -n 50
+echo ""
+
+echo "===== Python Tool --check Output ====="
+./scripts/patch_btrfs_ugos.py --check <TARGET>
+echo ""
+
+echo "===== Python Tool --dump Output ====="
+./scripts/patch_btrfs_ugos.py --dump <TARGET>
+echo ""
+
+echo "===== Backup Files ====="
+ls -la btrfs_sb_backup_*.bin
+sha256sum btrfs_sb_backup_*.bin
+echo ""
+
+echo "===== recover_btrfs.sh COW Test Output ====="
+echo "(If you ran the COW test, paste its full output here)"
+echo ""
+
+echo "===== System Info ====="
+lsblk -f
+cat /proc/version
+echo ""
+
+echo "===== End of Report ====="
+```
+
+**Attach `btrfs_test_report_*.txt` and the `btrfs_sb_backup_*.bin` files** to your report.
+
+---
+
+## What NOT To Do
+
+| ❌ Never Do This | Why |
+|---|---|
+| `sudo ./scripts/patch_btrfs_ugos.py /dev/mapper/ug_...` (without `--check` or `--dump` first) | This would write directly to your disk without a COW snapshot. |
+| Type `y` at the permanent patch prompt in `recover_btrfs.sh` | This applies the patch to the real disk. We are testing, not fixing yet. |
+| Delete the `btrfs_sb_backup_*.bin` files | These are your rollback insurance. |
+| Run any `dd` restore command unless you know exactly what you are doing | Restoring the wrong block to the wrong offset corrupts the superblock. |
+
+---
+
+## Troubleshooting
+
+### "no valid BTRFS superblocks found"
+- Make sure `<TARGET>` is the actual filesystem volume, not the raw RAID device or a partition.
+- Try `lsblk -f` and `blkid` to confirm the device has a BTRFS signature.
+
+### "bytenr mismatch"
+- This means the tool found a BTRFS magic signature but the `bytenr` field does not match the physical offset.
+- This could indicate RAID misassembly, misalignment, or a bug in our offset constants.
+- **Stop immediately** and send us the output.
+
+### "unsupported csum_type"
+- Your volume uses a checksum algorithm other than CRC32C (e.g., xxhash, sha256, blake2b).
+- The current tool only supports CRC32C. We will need to extend it.
+- **Stop immediately** and send us the output.
+
+### COW snapshot mount fails after patching
+- The kernel may still be rejecting the filesystem for a reason other than the incompat flag.
+- Check `dmesg | tail -n 30` for the exact error.
+- This is valuable data — send it to us.
+
+---
+
+## How to Submit Your Results
+
+1. Run all steps above.
+2. Compress the report and backup files:
+   ```bash
+   tar czvf btrfs_test_results.tar.gz btrfs_test_report_*.txt btrfs_sb_backup_*.bin
+   ```
+3. Open an issue in this repository and attach `btrfs_test_results.tar.gz`.
+4. Include any additional observations (e.g., "mount succeeded but dmesg shows warnings").
+
+Thank you for volunteering! Your careful testing helps make this tool safe for everyone.

@@ -26,10 +26,13 @@ if [ ! -x "$PATCHER" ]; then
     exit 1
 fi
 
-# Verify the volume is actually a UGREEN OS BTRFS volume
-if ! python3 "$PATCHER" --check "$TARGET_DEV" >/dev/null 2>&1; then
-    echo "Error: $TARGET_DEV does not have the UGREEN proprietary BTRFS flag set."
-    echo "Either this is not a UGREEN OS BTRFS volume, or it has already been patched."
+# ── Pre-flight read-only validation ──
+echo "=== Pre-flight: validating BTRFS superblocks (read-only) ==="
+if ! python3 "$PATCHER" --check "$TARGET_DEV"; then
+    echo ""
+    echo "Error: $TARGET_DEV failed validation."
+    echo "Either this is not a UGREEN OS BTRFS volume, it has already been patched,"
+    echo "or a critical safety check (bytenr / csum_type) failed."
     exit 1
 fi
 
@@ -64,19 +67,21 @@ cleanup() {
 
 trap cleanup EXIT INT TERM HUP
 
+echo ""
 echo "=== [1/5] Setting up COW Snapshot ==="
 echo "Target: $TARGET_DEV"
 truncate -s 1G "$COW_IMG"
 LOOP_DEV=$(losetup --find --show "$COW_IMG")
 SIZE=$(blockdev --getsz "$TARGET_DEV")
 
+# BUG-008 fix: quote all variables passed to dmsetup
 # Create snapshot: 0 <size> snapshot <origin> <cow> <persistent(P)/non-persistent(N)> <chunksize>
 # chunk size 8 = 8 sectors = 4 KiB (matches typical BTRFS node size)
-echo "0 $SIZE snapshot $TARGET_DEV $LOOP_DEV N 8" | dmsetup create "$SNAP_NAME"
+printf '%s\n' "0 $SIZE snapshot $TARGET_DEV $LOOP_DEV N 8" | dmsetup create "$SNAP_NAME"
 SNAP_DEV="/dev/mapper/$SNAP_NAME"
 echo "Created snapshot device: $SNAP_DEV"
 
-echo "=== [2/5] Patching BTRFS superblocks (Safe Mode) ==="
+echo "=== [2/5] Patching BTRFS superblocks (Safe Mode — COW snapshot only) ==="
 python3 "$PATCHER" --yes "$SNAP_DEV"
 
 echo "=== [3/5] Verifying filesystem integrity ==="
@@ -90,7 +95,7 @@ if ! mount -o ro "$SNAP_DEV" "$MOUNT_POINT" 2>/dev/null; then
 fi
 umount "$MOUNT_POINT"
 
-echo "=== [4/5] Mounting for verification ==="
+echo "=== [4/5] Mounting read-write for verification ==="
 mount "$SNAP_DEV" "$MOUNT_POINT"
 
 echo ""

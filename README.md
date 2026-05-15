@@ -86,6 +86,8 @@ The interactive script will:
 5. Safely clean up the snapshot.
 6. Ask for final confirmation before permanently fixing the real disk.
 
+**Volunteer Testing:** If you are helping test BTRFS support on your UGREEN NAS, please follow the detailed guide in [`BTRFS_TESTING.md`](BTRFS_TESTING.md). It contains step-by-step read-only and COW-snapshot testing instructions, plus a comprehensive log-gathering checklist.
+
 ## Notes & Gotchas
 * **ugacl_vfs Warning:** Once mounted on standard Linux, you may see `ugacl_vfs request_module failed` in `dmesg`. This is just Linux ignoring UGREEN's proprietary Access Control List (ACL) tags and safely falling back to standard POSIX permissions. It does not affect data integrity.
 * **BTRFS Rollback:** The Python tool automatically backs up all valid superblock mirrors to a timestamped `.bin` file before patching. If anything goes wrong, you can restore with `dd` (see `PRD_UGREEN_OS_BTRFS_PATCH.md`).
