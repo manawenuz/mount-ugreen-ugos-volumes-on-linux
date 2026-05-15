@@ -60,46 +60,37 @@ turns out to mean something else.
 
 ## 5. Implementation
 
-### 5.1 Clone e2fsprogs
+We have automated the cloning, patching, and building of `e2fsprogs`.
+You can run the provided script from the repository root:
 
 ```bash
-git clone https://git.kernel.org/pub/scm/fs/ext2/e2fsprogs.git
-cd e2fsprogs
+sudo ./scripts/build_patched_e2fsprogs.sh
 ```
 
-### 5.2 Patch
+This script uses the patch in `patches/0001-Recognize-ugreen_proprietary-incompat-feature.patch` and produces the patched binaries (`tune2fs`, `fuse2fs`, `e2image`, `e2fsck`) in the `build/e2fsprogs/` directory without installing them system-wide.
 
-**`lib/ext2fs/ext2fs.h`** — add the feature macro and include it in the
-library's supported incompat mask:
+### 5.1 What the Patch Does (Technical Details)
 
+**`lib/ext2fs/ext2_fs.h`** — Defines the feature flag:
 ```c
-#define EXT4_FEATURE_INCOMPAT_UGREEN_PROPRIETARY 0x20000000
+#define EXT4_FEATURE_INCOMPAT_UGREEN_PROPRIETARY 0x20000000 /* UGOS marker */
+```
 
-/* … existing EXT2_LIB_FEATURE_INCOMPAT_SUPP definition … */
+**`lib/ext2fs/ext2fs.h`** — Includes the flag in the library's supported incompat mask:
+```c
 #define EXT2_LIB_FEATURE_INCOMPAT_SUPP \
     ( /* existing flags */ | \
       EXT4_FEATURE_INCOMPAT_UGREEN_PROPRIETARY )
 ```
 
-**`lib/e2p/feature.c`** — add the bit-to-string mapping so users can
-reference it on the command line:
-
+**`lib/e2p/feature.c`** — Adds the bit-to-string mapping so users can reference it on the command line:
 ```c
 { EXT4_FEATURE_INCOMPAT_UGREEN_PROPRIETARY, "ugreen_proprietary" },
 ```
 
-### 5.3 Build
+**`misc/tune2fs.c`** — Adds the flag to the `clear_ok_features` list. This explicitly permits `tune2fs` to strip the flag (one-way conversion) when we run `tune2fs -O ^ugreen_proprietary`.
 
-```bash
-./configure
-make -j$(nproc)
-```
-
-No `make install` — we run the patched binaries directly out of the
-build tree (`misc/tune2fs`, `misc/fuse2fs`) to avoid clobbering the
-distro's `e2fsprogs`.
-
-### 5.4 User commands
+### 5.2 User commands
 
 Permanent fix (one-way):
 ```bash
@@ -207,9 +198,7 @@ forever without any of this song and dance.
 
 ## 9. Future Work
 
-- Automate the entire flow as `recover.sh`: clones e2fsprogs, applies
-  the patch, builds, performs the dm-snapshot test, and prompts before
-  touching the real disk.
+- Expand `scripts/build_patched_e2fsprogs.sh` into a fully automated `recover.sh` that also performs the dm-snapshot test and prompts before touching the real disk.
 - Submit the patch as a downstream/forked binary in the recovery repo.
   Upstream `e2fsprogs` will not accept an undocumented vendor feature,
   and rightly so.
