@@ -8,6 +8,26 @@
 
 We need a volunteer with a UGREEN NAS device formatted with **BTRFS** (not ext4) who can run a series of safe, non-destructive commands and share the output. **One complete run is enough** — if you capture everything listed below, we will not need to ask you to run anything again.
 
+Either environment works:
+- **UGREEN OS** (the stock proprietary firmware) — the kernel will mount the volume natively, which gives us extra signal.
+- **Vanilla Linux** (Debian, Ubuntu, TrueNAS SCALE, etc., booted from USB or installed) — the kernel will refuse to mount the volume, which is exactly the failure mode we are fixing.
+
+---
+
+## TL;DR — The One-Shot Validator
+
+If you just want the fastest, safest path, run the auto-validator. It is **100% read-only**, detects whether you are on UGOS or vanilla Linux, finds your volume, runs every safe check, and bundles everything into a single tarball you can send us.
+
+```bash
+sudo ./scripts/volunteer_validate.sh
+# or, with an explicit device:
+sudo ./scripts/volunteer_validate.sh /dev/mapper/ug_…
+```
+
+Output: `btrfs_volunteer_report_<timestamp>.tar.gz` in the repo root. Attach that file to your issue and you are done.
+
+The remaining sections (Steps 0–5) explain what the validator is doing under the hood, and how to run each step manually if you prefer.
+
 ---
 
 ## Step 0: Prerequisites
@@ -81,18 +101,27 @@ sudo dmesg | grep -i btrfs | tail -n 20
 sudo ./scripts/patch_btrfs_ugos.py --check <TARGET>
 ```
 
-**Expected success output:**
+**Expected success output (fresh UGREEN volume):**
 ```
 Found N valid BTRFS superblock mirror(s):
   - 0x00010000 (65536 bytes, 64.0 KiB)
   ...
-Check passed: all mirrors are valid BTRFS with:
+Check passed: all mirrors need patching and are structurally valid.
+  - CRC32C checksums verified
   - bytenr matches physical offset
   - csum_type = CRC32C (0)
   - UGREEN proprietary flag (0x4000000000000000) is present
 ```
 
-If you see **errors** here (e.g., "bytenr mismatch", "unsupported csum_type"), **stop immediately** and send us the output. Do not proceed.
+**Exit codes you may see:**
+
+| Code | Meaning | What to do |
+|---|---|---|
+| 0 | All mirrors valid and need patching, OR all mirrors already clean (read the stdout to tell them apart) | Proceed |
+| 1 | Validation error — CRC mismatch, bytenr mismatch, or unsupported csum_type | **Stop.** Send the output. |
+| 2 | Mixed state — some mirrors patched, some not (a previous run was interrupted) | Resume is possible; send the output before retrying |
+
+If you see **errors** (exit 1, e.g., "CRC mismatch", "bytenr mismatch", "unsupported csum_type"), **stop immediately** and send us the output. Do not proceed.
 
 ### 3.4 Dump superblocks for offline analysis (read-only)
 
@@ -190,6 +219,8 @@ Did the test succeed? Are you ready to permanently patch <TARGET>? (y/N)
 ---
 
 ## Step 5: Gather ALL Logs (This Is the Most Important Step)
+
+> **Shortcut:** If you used `volunteer_validate.sh` in the TL;DR section, you can skip this step — the validator already produced `btrfs_volunteer_report_<timestamp>.tar.gz` with everything below included. The manual recipe is kept here for transparency and for people who ran the steps by hand.
 
 We need everything in one place. Run the following commands and **copy the entire output into a text file** (or redirect with `>`):
 

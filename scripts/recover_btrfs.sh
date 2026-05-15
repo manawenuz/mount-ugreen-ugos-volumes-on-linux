@@ -28,13 +28,29 @@ fi
 
 # ── Pre-flight read-only validation ──
 echo "=== Pre-flight: validating BTRFS superblocks (read-only) ==="
-if ! python3 "$PATCHER" --check "$TARGET_DEV"; then
-    echo ""
-    echo "Error: $TARGET_DEV failed validation."
-    echo "Either this is not a UGREEN OS BTRFS volume, it has already been patched,"
-    echo "or a critical safety check (CRC / bytenr / csum_type) failed."
-    exit 1
-fi
+CHECK_RC=0
+python3 "$PATCHER" --check "$TARGET_DEV" || CHECK_RC=$?
+case "$CHECK_RC" in
+    0)
+        echo "Pre-flight passed: all mirrors are structurally valid."
+        ;;
+    2)
+        echo "Pre-flight passed: mixed state detected (some mirrors need patching, some already clean)."
+        echo "The COW test will patch only the mirrors that still need it."
+        ;;
+    1)
+        echo ""
+        echo "Error: $TARGET_DEV failed validation."
+        echo "Either this is not a UGREEN OS BTRFS volume, it has already been patched,"
+        echo "or a critical safety check (CRC / bytenr / csum_type) failed."
+        exit 1
+        ;;
+    *)
+        echo ""
+        echo "Error: unexpected exit code $CHECK_RC from --check."
+        exit 1
+        ;;
+esac
 
 # ── BUG-011 fix: only apply tmpfs heuristic when COW_DIR is not user-provided ──
 if [ -z "${COW_DIR:-}" ]; then
@@ -135,13 +151,16 @@ if [[ "$confirm" =~ ^[Yy]$ ]]; then
     python3 "$PATCHER" --yes "$TARGET_DEV"
 
     echo "=== Verifying permanent patch ==="
-    if python3 "$PATCHER" --check "$TARGET_DEV" >/dev/null 2>&1; then
-        echo "WARNING: UGREEN flag still detected after patching!" >&2
-        echo "Do NOT attempt to mount. Investigate before proceeding." >&2
-        exit 1
-    else
+    VERIFY_RC=0
+    python3 "$PATCHER" --check "$TARGET_DEV" >/dev/null 2>&1 || VERIFY_RC=$?
+    if [ "$VERIFY_RC" -eq 0 ]; then
         echo "Done! UGREEN proprietary flag is cleared."
         echo "You can now natively mount $TARGET_DEV with any standard Linux kernel."
+    else
+        echo "WARNING: Verification failed after patching (exit $VERIFY_RC)!" >&2
+        echo "The UGREEN flag may still be present, or an error occurred." >&2
+        echo "Do NOT attempt to mount. Investigate before proceeding." >&2
+        exit 1
     fi
 else
     echo "Aborted permanent patch."
