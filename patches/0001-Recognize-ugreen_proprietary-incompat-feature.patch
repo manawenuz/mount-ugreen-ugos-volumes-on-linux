@@ -1,0 +1,73 @@
+From: UGOS Recovery <none@example.com>
+Subject: [PATCH] Recognize ugreen_proprietary (0x20000000) ext4 incompat feature
+
+UGREEN's UGOS sets an undocumented ext4 incompat feature flag at bit
+0x20000000 on every volume it creates. This flag has no observable
+on-disk effect (filesystems mount and read/write correctly under the
+UGOS kernel even when the proprietary ugacl module fails to load),
+but it prevents mounting on standard Linux kernels.
+
+Teach e2fsprogs to recognize the flag as a known feature so tune2fs
+can strip it via `tune2fs -O ^ugreen_proprietary <device>`, which
+will atomically clear the bit, recalculate the CRC32c superblock
+checksum, and propagate the change to all backup superblocks.
+
+The flag is added to clear_ok_features only — we do not allow users
+to set it. This is a one-way conversion to standard ext4.
+
+---
+ lib/e2p/feature.c     | 2 ++
+ lib/ext2fs/ext2_fs.h  | 1 +
+ lib/ext2fs/ext2fs.h   | 3 ++-
+ misc/tune2fs.c        | 3 ++-
+ 4 files changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/lib/e2p/feature.c b/lib/e2p/feature.c
+--- a/lib/e2p/feature.c
++++ b/lib/e2p/feature.c
+@@ -120,6 +120,8 @@ static struct feature incompat_features[] = {
+ 			"casefold"},
+ 	{       E2P_FEATURE_INCOMPAT, EXT4_FEATURE_INCOMPAT_CASEFOLD,
+ 			"fname_encoding"},
++	{	E2P_FEATURE_INCOMPAT, EXT4_FEATURE_INCOMPAT_UGREEN_PROPRIETARY,
++			"ugreen_proprietary"},
+ 	{	0, 0, 0 },
+ };
+
+diff --git a/lib/ext2fs/ext2_fs.h b/lib/ext2fs/ext2_fs.h
+--- a/lib/ext2fs/ext2_fs.h
++++ b/lib/ext2fs/ext2_fs.h
+@@ -874,6 +874,7 @@
+ #define EXT4_FEATURE_INCOMPAT_INLINE_DATA	0x8000 /* data in inode */
+ #define EXT4_FEATURE_INCOMPAT_ENCRYPT		0x10000
+ #define EXT4_FEATURE_INCOMPAT_CASEFOLD		0x20000
++#define EXT4_FEATURE_INCOMPAT_UGREEN_PROPRIETARY 0x20000000 /* UGOS marker */
+
+ #define EXT4_FEATURE_COMPAT_FUNCS(name, ver, flagname) \
+ static inline int ext2fs_has_feature_##name(struct ext2_super_block *sb) \
+diff --git a/lib/ext2fs/ext2fs.h b/lib/ext2fs/ext2fs.h
+--- a/lib/ext2fs/ext2fs.h
++++ b/lib/ext2fs/ext2fs.h
+@@ -732,7 +732,8 @@
+ 					 EXT4_FEATURE_INCOMPAT_ENCRYPT|\
+ 					 EXT4_FEATURE_INCOMPAT_CASEFOLD|\
+ 					 EXT4_FEATURE_INCOMPAT_CSUM_SEED|\
+-					 EXT4_FEATURE_INCOMPAT_LARGEDIR)
++					 EXT4_FEATURE_INCOMPAT_LARGEDIR|\
++					 EXT4_FEATURE_INCOMPAT_UGREEN_PROPRIETARY)
+
+ #define EXT2_LIB_FEATURE_RO_COMPAT_SUPP	(EXT2_FEATURE_RO_COMPAT_SPARSE_SUPER|\
+ 					 EXT4_FEATURE_RO_COMPAT_HUGE_FILE|\
+diff --git a/misc/tune2fs.c b/misc/tune2fs.c
+--- a/misc/tune2fs.c
++++ b/misc/tune2fs.c
+@@ -224,7 +224,8 @@ static __u32 clear_ok_features[3] = {
+ 		EXT4_FEATURE_INCOMPAT_MMP |
+ 		EXT4_FEATURE_INCOMPAT_64BIT |
+ 		EXT4_FEATURE_INCOMPAT_CSUM_SEED |
+-		EXT4_FEATURE_INCOMPAT_CASEFOLD,
++		EXT4_FEATURE_INCOMPAT_CASEFOLD |
++		EXT4_FEATURE_INCOMPAT_UGREEN_PROPRIETARY,
+ 	/* R/O compat */
+ 	EXT2_FEATURE_RO_COMPAT_LARGE_FILE |
+ 		EXT4_FEATURE_RO_COMPAT_HUGE_FILE|
