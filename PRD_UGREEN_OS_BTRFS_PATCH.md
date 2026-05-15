@@ -1,7 +1,7 @@
 # Product Requirements Document: UGREEN OS BTRFS Native Recovery
 
 ## 1. Problem Statement
-UGREEN OS on newer models (e.g., DXP6800 Pro Founder Edition) utilizes `btrfs` instead of `ext4` for primary storage pools. Similar to their ext4 implementation, UGREEN has injected a proprietary "incompatible feature" flag into the BTRFS superblock to enforce vendor lock-in and prevent standard Linux distributions (TrueNAS, Unraid, mainline Debian) from mounting the arrays.
+When formatting a new storage pool, UGREEN OS gives users the choice between `ext4` and `btrfs`. Similar to their ext4 implementation, when a user selects BTRFS, UGREEN injects a proprietary "incompatible feature" flag into the BTRFS superblock to enforce vendor lock-in and prevent standard Linux distributions (TrueNAS, Unraid, mainline Debian) from mounting the arrays.
 
 Specifically, UGREEN tools set **Bit 62** (`0x4000000000000000`) in the BTRFS `incompat_flags` field (offset `0x128`). Their internal patched `btrfs-progs` decodes this bit as `ugacl`.
 
