@@ -100,7 +100,13 @@ If you see **errors** here (e.g., "bytenr mismatch", "unsupported csum_type"), *
 sudo ./scripts/patch_btrfs_ugos.py --dump <TARGET>
 ```
 
-This creates timestamped `btrfs_sb_backup_<device>_offset_<hex>_<timestamp>.bin` files in your current directory. These are exact 4 KiB copies of each superblock mirror. **Keep these files** — they are your insurance policy.
+This creates timestamped `btrfs_sb_backup_<device>_offset_<hex>_<timestamp>.bin` files. By default they are written to the current directory. You can redirect them elsewhere with `--backup-dir`:
+
+```bash
+sudo ./scripts/patch_btrfs_ugos.py --dump --backup-dir /mnt/safe-disk/backups <TARGET>
+```
+
+These are exact 4 KiB copies of each superblock mirror. **Keep these files** — they are your insurance policy.
 
 List them:
 
@@ -214,12 +220,12 @@ echo "===== Python Tool --check Output ====="
 echo ""
 
 echo "===== Python Tool --dump Output ====="
-./scripts/patch_btrfs_ugos.py --dump <TARGET>
+./scripts/patch_btrfs_ugos.py --dump --backup-dir /tmp/btrfs_backups <TARGET>
 echo ""
 
 echo "===== Backup Files ====="
-ls -la btrfs_sb_backup_*.bin
-sha256sum btrfs_sb_backup_*.bin
+ls -la /tmp/btrfs_backups/btrfs_sb_backup_*.bin
+sha256sum /tmp/btrfs_backups/btrfs_sb_backup_*.bin
 echo ""
 
 echo "===== recover_btrfs.sh COW Test Output ====="
@@ -246,6 +252,7 @@ echo "===== End of Report ====="
 | Type `y` at the permanent patch prompt in `recover_btrfs.sh` | This applies the patch to the real disk. We are testing, not fixing yet. |
 | Delete the `btrfs_sb_backup_*.bin` files | These are your rollback insurance. |
 | Run any `dd` restore command unless you know exactly what you are doing | Restoring the wrong block to the wrong offset corrupts the superblock. |
+| Back up to the same disk being patched | If the patch goes wrong, the backup is on the same failed disk. Always use `--backup-dir` on a different physical device. |
 
 ---
 
@@ -265,10 +272,41 @@ echo "===== End of Report ====="
 - The current tool only supports CRC32C. We will need to extend it.
 - **Stop immediately** and send us the output.
 
+### `--check` exits with code 2
+- Exit code 2 means a **mixed state**: some mirrors already have the UGREEN flag cleared (possibly from a previous interrupted run) and others still need patching.
+- This is expected if a prior patch was interrupted. You can safely resume by running the patcher again — it will skip already-clean mirrors and patch only the remaining ones.
+
 ### COW snapshot mount fails after patching
 - The kernel may still be rejecting the filesystem for a reason other than the incompat flag.
 - Check `dmesg | tail -n 30` for the exact error.
 - This is valuable data — send it to us.
+
+---
+
+## Crash Safety
+
+If the patcher is killed by SIGKILL or the system loses power between writing mirror *N* and mirror *N+1*, you may end up with a **partially patched** state: some superblock mirrors have the UGREEN flag cleared while others still have it set.
+
+### Is this dangerous?
+
+Usually **no**. The BTRFS kernel driver scans all mirrors and selects the one with the newest `generation` number. Since our patcher does not modify `generation`, all mirrors at identical generations are equally valid from the driver's perspective. If it picks a patched mirror, the volume mounts cleanly. If it picks an unpatched mirror, it fails with the same "unsupported feature" error as before.
+
+### How to recover from a partial patch
+
+Simply re-run the patcher. It will:
+1. Detect which mirrors are already clean.
+2. Skip those mirrors.
+3. Patch only the remaining mirrors.
+
+You can verify the current state anytime with:
+
+```bash
+sudo ./scripts/patch_btrfs_ugos.py --check <TARGET>
+```
+
+- Exit code **0** = all mirrors are clean (nothing to do).
+- Exit code **2** = mixed state (resume needed).
+- Exit code **1** = error (CRC mismatch, bytenr mismatch, etc.).
 
 ---
 
@@ -281,5 +319,43 @@ echo "===== End of Report ====="
    ```
 3. Open an issue in this repository and attach `btrfs_test_results.tar.gz`.
 4. Include any additional observations (e.g., "mount succeeded but dmesg shows warnings").
+
+---
+
+## Fixture Testing (For Developers / Advanced Users)
+
+If you want to verify the tool's behavior against synthetic test fixtures before running it on real hardware, create a loopback image and manipulate it:
+
+```bash
+# Create a 100 MiB test image
+truncate -s 100M /tmp/test_btrfs.img
+# Create a BTRFS filesystem on it
+mkfs.btrfs /tmp/test_btrfs.img
+# Set the UGREEN flag manually (requires python or xxd)
+python3 -c "
+import struct
+with open('/tmp/test_btrfs.img', 'r+b') as f:
+    for off in [0x10000, 0x4000000]:
+        f.seek(off + 0xBC)
+        flags = struct.unpack('<Q', f.read(8))[0]
+        flags |= 0x4000000000000000
+        f.seek(off + 0xBC)
+        f.write(struct.pack('<Q', flags))
+        # Recalculate CRC (simplified — full script does this properly)
+"
+```
+
+Then test the tool's exit codes:
+
+| Fixture | Command | Expected Exit Code |
+|---|---|---|
+| Clean UGREEN volume | `--check` | **0** |
+| Corrupt CRC (flip one bit in superblock body) | `--check` | **1** |
+| Partially patched (clear flag on mirror 0 only) | `--check` | **2** |
+| All mirrors already clean | `--check` | **0** (with "Nothing to patch" message) |
+
+These fixtures give you confidence in the tool's safety logic without risking real data.
+
+---
 
 Thank you for volunteering! Your careful testing helps make this tool safe for everyone.

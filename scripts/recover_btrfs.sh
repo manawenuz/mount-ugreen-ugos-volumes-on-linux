@@ -32,16 +32,25 @@ if ! python3 "$PATCHER" --check "$TARGET_DEV"; then
     echo ""
     echo "Error: $TARGET_DEV failed validation."
     echo "Either this is not a UGREEN OS BTRFS volume, it has already been patched,"
-    echo "or a critical safety check (bytenr / csum_type) failed."
+    echo "or a critical safety check (CRC / bytenr / csum_type) failed."
     exit 1
 fi
 
-COW_DIR="${COW_DIR:-/var/tmp}"
-if df --type=tmpfs /tmp >/dev/null 2>&1; then
-    echo "Note: /tmp is tmpfs, using $COW_DIR for COW file"
-else
-    COW_DIR="/tmp"
+# ── BUG-011 fix: only apply tmpfs heuristic when COW_DIR is not user-provided ──
+if [ -z "${COW_DIR:-}" ]; then
+    if df --type=tmpfs /tmp >/dev/null 2>&1; then
+        COW_DIR="/var/tmp"
+        echo "Note: /tmp is tmpfs, using $COW_DIR for COW file"
+    else
+        COW_DIR="/tmp"
+    fi
 fi
+echo "COW directory: $COW_DIR"
+
+# ── BUG-015 fix: configurable COW size, default 4G ──
+COW_SIZE="${COW_SIZE:-4G}"
+echo "COW size: $COW_SIZE"
+
 COW_IMG="$COW_DIR/ugreen_os_btrfs_cow_$$.img"
 SNAP_NAME="ugos_btrfs_safe_test_$$"
 MOUNT_POINT="/mnt/recovery_btrfs_test_$$"
@@ -70,7 +79,7 @@ trap cleanup EXIT INT TERM HUP
 echo ""
 echo "=== [1/5] Setting up COW Snapshot ==="
 echo "Target: $TARGET_DEV"
-truncate -s 1G "$COW_IMG"
+truncate -s "$COW_SIZE" "$COW_IMG"
 LOOP_DEV=$(losetup --find --show "$COW_IMG")
 SIZE=$(blockdev --getsz "$TARGET_DEV")
 
@@ -95,8 +104,9 @@ if ! mount -o ro "$SNAP_DEV" "$MOUNT_POINT" 2>/dev/null; then
 fi
 umount "$MOUNT_POINT"
 
-echo "=== [4/5] Mounting read-write for verification ==="
-mount "$SNAP_DEV" "$MOUNT_POINT"
+# ── BUG-015 fix: mount rw with noatime,nodiratime to minimize COW churn ──
+echo "=== [4/5] Mounting read-write for verification (noatime,nodiratime) ==="
+mount -o noatime,nodiratime "$SNAP_DEV" "$MOUNT_POINT"
 
 echo ""
 echo "==========================================================="

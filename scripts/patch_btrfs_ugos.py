@@ -16,12 +16,17 @@ Usage:
     # Patch (DANGEROUS — only run on COW snapshots or after validation)
     sudo ./patch_btrfs_ugos.py --yes /dev/mapper/<your-btrfs-volume>
 
+    # Patch with backups to a safe directory
+    sudo ./patch_btrfs_ugos.py --yes --backup-dir /mnt/other-disk/backups /dev/mapper/...
+
 See recover_btrfs.sh for the safe COW-snapshot recovery flow.
 """
 
 import argparse
 import os
+import stat
 import struct
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -53,6 +58,7 @@ OFF_CSUM_TYPE = 0xC4     # 2 bytes — must be 0 (CRC32C)
 
 # UGREEN proprietary incompatible feature flag (bit 62)
 UGREEN_PROPRIETARY_BIT = 0x4000000000000000
+
 
 # ── CRC32C (Castagnoli) implementation ───────────────────────────────────────
 
@@ -101,6 +107,20 @@ def find_valid_superblocks(device_path: str):
     return valid
 
 
+def verify_superblock_crc(block: bytearray) -> tuple[bool, int, int]:
+    """
+    Verify the stored CRC32C against the block body.
+    Returns (ok, stored_crc, computed_crc).
+    """
+    stored_crc = struct.unpack("<I", block[OFF_CSUM:OFF_CSUM + 4])[0]
+    # Zero out checksum area, compute CRC over the remainder
+    saved_csum = block[OFF_CSUM:OFF_CSUM + BTRFS_CSUM_SIZE]
+    block[OFF_CSUM:OFF_CSUM + BTRFS_CSUM_SIZE] = b"\x00" * BTRFS_CSUM_SIZE
+    computed_crc = crc32c(block[OFF_CSUM_DATA_START:BTRFS_SUPER_INFO_SIZE])
+    block[OFF_CSUM:OFF_CSUM + BTRFS_CSUM_SIZE] = saved_csum
+    return (stored_crc == computed_crc, stored_crc, computed_crc)
+
+
 def verify_bytenr_matches(offset: int, block: bytearray) -> bool:
     """
     The bytenr field at 0x30 must equal the physical offset where we read
@@ -141,18 +161,51 @@ def patch_superblock(block: bytearray) -> None:
     block[OFF_CSUM:OFF_CSUM + 4] = struct.pack("<I", new_crc)
 
 
-def write_backups(valid_blocks, device_path: str) -> list:
+# ── Backup helpers ───────────────────────────────────────────────────────────
+
+def _check_backup_dir_safe(backup_dir: str, device_path: str) -> bool:
     """
-    Write each valid superblock to its own raw backup file.
+    Return True if backup_dir is NOT on the same underlying block device
+    as device_path. Uses findmnt when available.
+    """
+    backup_dir = os.path.realpath(backup_dir)
+    device_path = os.path.realpath(device_path)
+
+    # If findmnt is available, ask what block device backs backup_dir
+    try:
+        result = subprocess.run(
+            ["findmnt", "-n", "-o", "SOURCE", "--target", backup_dir],
+            capture_output=True, text=True, check=True,
+        )
+        backing = result.stdout.strip().split("\n")[0]
+        if backing:
+            backing_real = os.path.realpath(backing) if os.path.exists(backing) else backing
+            device_real = os.path.realpath(device_path)
+            if backing_real == device_real:
+                return False
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
+    return True
+
+
+def write_backups(valid_blocks, device_path: str, backup_dir: str) -> list:
+    """
+    Write each valid superblock to its own raw backup file under backup_dir.
     Returns a list of (offset, filepath) tuples.
     """
+    backup_dir = os.path.realpath(backup_dir)
+    os.makedirs(backup_dir, exist_ok=True)
+
     timestamp = int(time.time())
     safe_name = Path(device_path).name.replace("/", "_")
     backups = []
 
     for offset, block in valid_blocks:
-        backup_name = f"btrfs_sb_backup_{safe_name}_offset_{offset:08X}_{timestamp}.bin"
-        backup_path = Path(backup_name).resolve()
+        backup_name = (
+            f"btrfs_sb_backup_{safe_name}_offset_{offset:08X}_{timestamp}.bin"
+        )
+        backup_path = Path(backup_dir) / backup_name
         with open(backup_path, "wb") as f:
             f.write(block)
         # Verify what we wrote
@@ -182,12 +235,19 @@ def main():
     parser.add_argument(
         "--check",
         action="store_true",
-        help="Read-only check: verify BTRFS magic, bytenr, csum_type, and UGREEN flag.",
+        help="Read-only check: verify BTRFS magic, CRC, bytenr, csum_type, and UGREEN flag.",
     )
     parser.add_argument(
         "--dump",
         action="store_true",
         help="Read-only dump: save all valid superblocks to timestamped .bin files.",
+    )
+    parser.add_argument(
+        "--backup-dir",
+        dest="backup_dir",
+        default=".",
+        help="Directory for superblock backups (default: current directory). "
+             "Should be on a different physical disk than the target device.",
     )
     args = parser.parse_args()
 
@@ -222,59 +282,118 @@ def main():
     for offset, _ in valid_blocks:
         print(f"  - 0x{offset:08X} ({offset} bytes, {offset / 1024:.1f} KiB)")
 
-    # ── Validate each mirror ──
-    all_ok = True
+    # ── Validate each mirror and classify ──
+    # Per-mirror classification: error | needs_patch | already_clean
+    mirror_states = {}  # offset -> state
+    has_error = False
+    needs_patch_count = 0
+    already_clean_count = 0
+
     for offset, block in valid_blocks:
-        # 1. Bytenr must match physical offset
+        errors = []
+
+        # 1. CRC validation (BUG-010)
+        crc_ok, stored_crc, computed_crc = verify_superblock_crc(block)
+        if not crc_ok:
+            errors.append(
+                f"CRC mismatch at mirror 0x{offset:08X} "
+                f"(stored=0x{stored_crc:08X}, computed=0x{computed_crc:08X})"
+            )
+
+        # 2. Bytenr must match physical offset
         if not verify_bytenr_matches(offset, block):
             bytenr = struct.unpack("<Q", block[OFF_BYTENR:OFF_BYTENR + 8])[0]
-            print(
-                f"  ERROR: bytenr mismatch at mirror 0x{offset:08X}. "
-                f"Expected 0x{offset:08X}, found 0x{bytenr:08X}.",
-                file=sys.stderr,
+            errors.append(
+                f"bytenr mismatch at mirror 0x{offset:08X} "
+                f"(expected=0x{offset:08X}, found=0x{bytenr:08X})"
             )
-            all_ok = False
 
-        # 2. csum_type must be CRC32C (0)
+        # 3. csum_type must be CRC32C (0)
         if not verify_csum_type_crc32c(block):
             csum_type = struct.unpack("<H", block[OFF_CSUM_TYPE:OFF_CSUM_TYPE + 2])[0]
-            print(
-                f"  ERROR: unsupported csum_type={csum_type} at mirror 0x{offset:08X}. "
-                f"Only CRC32C (0) is supported.",
-                file=sys.stderr,
+            errors.append(
+                f"unsupported csum_type={csum_type} at mirror 0x{offset:08X} "
+                f"(only CRC32C/0 is supported)"
             )
-            all_ok = False
 
-        # 3. UGREEN flag must be set
-        if not verify_ugreen_flag_set(block):
+        # 4. UGREEN flag state
+        ugreen_set = verify_ugreen_flag_set(block)
+
+        if errors:
+            has_error = True
+            mirror_states[offset] = "error"
+            for e in errors:
+                print(f"  ERROR: {e}", file=sys.stderr)
+        elif ugreen_set:
+            mirror_states[offset] = "needs_patch"
+            needs_patch_count += 1
+        else:
+            mirror_states[offset] = "already_clean"
+            already_clean_count += 1
             print(
-                f"  Warning: UGREEN proprietary bit NOT set at mirror 0x{offset:08X}. "
-                "This mirror may already be patched or is not a UGREEN OS volume."
+                f"  Info: mirror 0x{offset:08X} is already clean "
+                "(UGREEN flag not set)."
             )
-            all_ok = False
 
-    if not all_ok:
-        print("\nValidation failed. Aborting to avoid data corruption.", file=sys.stderr)
+    # ── Handle error state ──
+    if has_error:
+        print(
+            "\nValidation failed due to errors above. Aborting to avoid data corruption.",
+            file=sys.stderr,
+        )
         sys.exit(1)
+
+    # ── Handle all-clean state ──
+    if needs_patch_count == 0:
+        if already_clean_count > 0:
+            print("\nAll mirrors are already clean. Nothing to patch.")
+            sys.exit(0)
+        else:
+            # Should not reach here (no valid blocks caught earlier)
+            print("\nNo actionable mirrors found.", file=sys.stderr)
+            sys.exit(1)
 
     # ── Read-only modes ──
     if args.dump:
-        backups = write_backups(valid_blocks, device)
+        backups = write_backups(valid_blocks, device, args.backup_dir)
         print("\nDump complete. Superblock backups saved (read-only, originals untouched):")
         for offset, path in backups:
             print(f"  0x{offset:08X} -> {path}")
         sys.exit(0)
 
     if args.check:
-        print("\nCheck passed: all mirrors are valid BTRFS with:")
-        print("  - bytenr matches physical offset")
-        print("  - csum_type = CRC32C (0)")
-        print("  - UGREEN proprietary flag (0x4000000000000000) is present")
-        sys.exit(0)
+        if already_clean_count > 0:
+            print(
+                f"\nCheck: mixed state detected ({needs_patch_count} need patching, "
+                f"{already_clean_count} already clean). A resume is possible.",
+                file=sys.stderr,
+            )
+            sys.exit(2)  # distinct exit code for mixed/resume state
+        else:
+            print("\nCheck passed: all mirrors need patching and are structurally valid.")
+            print("  - CRC32C checksums verified")
+            print("  - bytenr matches physical offset")
+            print("  - csum_type = CRC32C (0)")
+            print("  - UGREEN proprietary flag (0x4000000000000000) is present")
+            sys.exit(0)
+
+    # ── Patch mode: check backup-dir safety (BUG-012) ──
+    if not _check_backup_dir_safe(args.backup_dir, device):
+        print(
+            f"\nError: backup directory '{args.backup_dir}' appears to be on the same "
+            f"physical device as '{device}'.",
+            file=sys.stderr,
+        )
+        print(
+            "Writing backups to the device being mutated destroys the rollback path. "
+            "Use --backup-dir pointing to a different disk.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     # ── Backup before writing ──
     print("\nCreating backups before patching...")
-    backups = write_backups(valid_blocks, device)
+    backups = write_backups(valid_blocks, device, args.backup_dir)
     for offset, path in backups:
         print(f"  0x{offset:08X} -> {path}")
 
@@ -285,15 +404,23 @@ def main():
             f"{device}."
         )
         print("Make sure you have validated this on a COW snapshot first.")
+        if already_clean_count > 0:
+            print(
+                f"Note: {already_clean_count} mirror(s) are already clean and will be skipped."
+            )
         confirm = input("Proceed? [y/N]: ").strip().lower()
         if confirm != "y":
             print("Aborted.")
             sys.exit(0)
 
-    # ── Patch and write back ──
+    # ── Patch and write back (BUG-013: skip already_clean) ──
     print("\nPatching superblocks...")
     with open(device, "r+b") as f:
         for offset, block in valid_blocks:
+            if mirror_states[offset] == "already_clean":
+                print(f"  Skipping already-clean mirror 0x{offset:08X}")
+                continue
+
             patch_superblock(block)
 
             # Post-patch sanity checks

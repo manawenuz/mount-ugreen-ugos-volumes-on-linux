@@ -3,49 +3,56 @@
 ## 1. Overview
 A series of critical defects have been identified in the BTRFS patching toolchain. These range from destructive offset errors to logic failures that would prevent successful restoration or mounting. This document serves as the authoritative list of bugs to be remediated before the tool is released.
 
-## 2. Critical Data Loss Risks
+## 2. Resolved Bugs
 
-### BUG-001: Incorrect `OFF_INCOMPAT_FLAGS`
-*   **Current Value:** `0x128`
-*   **Correct Value:** `0xBC`
-*   **Impact:** Destructive. The tool patches random data inside the device identity (`dev_item.fsid`) and volume label. The actual `ugacl` flag remains set, so the volume still won't mount, but the metadata is now corrupted.
+### BUG-001: Incorrect `OFF_INCOMPAT_FLAGS` (RESOLVED)
+*   **Status:** FIXED. Offset updated to `0xBC`.
+*   **Impact:** Destructive risk eliminated.
 
-### BUG-002: Checksum Type Assumption
-*   **Detail:** The tool assumes `CRC32C`. It does not check the `csum_type` field at offset `0xC4`.
-*   **Impact:** If a user has a volume using `XXHASH`, `SHA256`, or `BLAKE2B` (available in modern kernels), the tool will overwrite the checksum with a CRC32C, permanently corrupting the superblock.
+### BUG-002: Checksum Type Assumption (RESOLVED)
+*   **Status:** FIXED. Tool now verifies `csum_type == 0` (CRC32C) before patching.
 
-### BUG-003: Bytenr Validation Absence
-*   **Detail:** The tool does not verify the `bytenr` field at offset `0x30` against the physical offset where the block was found.
-*   **Impact:** High. If the tool is misaligned or reading from an unexpected location, it will calculate a "valid" CRC for garbage data and write it back.
+### BUG-003: Bytenr Validation Absence (RESOLVED)
+*   **Status:** FIXED. Tool now verifies that the superblock's internal `bytenr` field matches its physical disk offset.
 
-## 3. Restoration & Rollback Failures
+### BUG-004: Mirror Restore `bytenr` Mismatch (RESOLVED)
+*   **Status:** FIXED. Backups are now per-mirror, and rollback instructions utilize the correct block for each physical slot.
 
-### BUG-004: Mirror Restore `bytenr` Mismatch
-*   **Detail:** The PRD's `dd` instructions suggest restoring the same first block from the backup into all mirror slots (64KiB, 64MiB, etc.).
-*   **Impact:** Failure. Each mirror *must* have its unique physical offset stored in its own `bytenr` field (0x30). Restoring the 64KiB block into the 64MiB slot results in a kernel mount error: `superblock bytenr mismatch`.
+### BUG-005: Backup Format Offset Prefix (RESOLVED)
+*   **Status:** FIXED. Backups are now raw 4KiB blocks.
 
-### BUG-005: Backup Format Offset Prefix
-*   **Detail:** `write_backup()` adds an 8-byte binary offset prefix to each 4KiB block.
-*   **Impact:** Standard `dd` commands will write the 8-byte prefix into the device, immediately corrupting the superblock structure.
+### BUG-006: Rollback Instruction Mismatch (RESOLVED)
+*   **Status:** FIXED. Documentation now reflects raw binary restoration.
 
-### BUG-006: Rollback Instruction Mismatch
-*   **Detail:** The documentation's `dd` commands do not account for the block-prefixing in the backup file.
+### BUG-007: Erroneous 1 PiB Mirror Offset (RESOLVED)
+*   **Status:** FIXED. Non-standard mirror removed; list limited to 64KiB, 64MiB, and 256GiB.
 
-## 4. Logic & Safety Bugs
+### BUG-008: `dmsetup` Quoting Vulnerability (RESOLVED)
+*   **Status:** FIXED. Shell script now uses hardened string passing for device paths.
 
-### BUG-007: Erroneous 1 PiB Mirror Offset
-*   **Detail:** The code calculates a 4th mirror at `1024^5` (1 PiB). Standard BTRFS mirrors only go up to 256 GiB. Additionally, the calculation is mathematically inconsistent with the "1 TiB" comment.
+### BUG-009: Misleading `OFF_BYTENR` Constant (RESOLVED)
+*   **Status:** FIXED. Constants renamed to `OFF_BYTENR` (0x30) and `OFF_CSUM_DATA_START` (0x20).
 
-### BUG-008: `dmsetup` Quoting Vulnerability
-*   **Detail:** In `recover_btrfs.sh`, device paths are passed to `echo | dmsetup` without quotes.
-*   **Impact:** The script will fail or behave dangerously if a volume name contains spaces (e.g., `/dev/mapper/UGO Vol 1`).
+### BUG-010: No verification of existing superblock CRC32C before patching (RESOLVED)
+*   **Status:** FIXED. `find_valid_superblocks` now verifies the stored CRC32C against the body before accepting a mirror. CRC mismatch is treated as a hard abort. The same check surfaces in `--check` and `--dump` modes.
+*   **Impact:** Prevents masking pre-existing silent corruption (bit rot, aborted writes) with a freshly valid CRC.
 
-### BUG-009: Misleading `OFF_BYTENR` Constant
-*   **Detail:** Offset `0x20` is the `fsid`, not `bytenr`. While it works as a range-start for the CRC, the naming causes confusion during maintenance.
+### BUG-011: `COW_DIR` user override silently discarded when `/tmp` is not tmpfs (RESOLVED)
+*   **Status:** FIXED. `recover_btrfs.sh` now only applies the tmpfs heuristic when `COW_DIR` was not explicitly provided by the caller.
+*   **Impact:** User-exported `COW_DIR=/some/path` is now always honored.
 
-## 5. Remediation Requirements
-1.  **Code**: Fix all offsets (`0xBC`, `0x30`, `0x20`).
-2.  **Backup**: Remove binary prefixes; write raw 4KiB blocks.
-3.  **Safety**: Add `csum_type` and `bytenr` cross-verification before writing.
-4.  **Shell**: Quote all device variables and fix mirror offsets.
-5.  **Docs**: Update `dd` instructions to account for mirror-specific blocks.
+### BUG-012: Superblock backups written to current working directory (RESOLVED)
+*   **Status:** FIXED. Added `--backup-dir DIR` argument. Before writing, the tool uses `findmnt` to verify the backup directory is not on the same underlying block device as the target. If the check detects a collision, it aborts with a clear remediation hint.
+*   **Impact:** Eliminates the risk of writing the only rollback artefact onto the device being mutated.
+
+### BUG-013: Pre-flight requires UGREEN flag on *every* mirror, preventing resume after partial patch (RESOLVED)
+*   **Status:** FIXED. The patcher now classifies each mirror as `needs_patch`, `already_clean`, or `error`. Runs are permitted when all mirrors are either `needs_patch` or `already_clean`, with at least one `needs_patch`. Already-clean mirrors are skipped during writes. `--check` exits with code 2 for the mixed state so operators know a resume is possible.
+*   **Impact:** Interrupted runs can now be resumed safely without manual intervention.
+
+### BUG-014: Partial-write crash window across mirrors is undocumented (RESOLVED)
+*   **Status:** FIXED. Added a "Crash Safety" subsection to `BTRFS_TESTING.md` describing the window, the kernel's mirror-selection behaviour, and the resume procedure introduced in BUG-013.
+*   **Impact:** Operators now understand the risk and the remediation path.
+
+### BUG-015: 1 GiB COW image may overflow during inspection (RESOLVED)
+*   **Status:** FIXED. Default COW size bumped to 4 GiB. Mount step now uses `-o noatime,nodiratime`. `COW_SIZE` exposed as an environment override alongside `COW_DIR`.
+*   **Impact:** Long inspection sessions no longer risk COW exhaustion.
