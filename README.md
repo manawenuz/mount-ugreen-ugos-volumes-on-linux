@@ -4,28 +4,40 @@ A practical guide to recovering data from UGREEN NASync devices (DXP4800 Plus, D
 
 ## The Problem
 
-UGREEN's UGREEN OS is Debian 12 + a custom Linux 6.12.30+ kernel that adds an **undocumented ext4 incompat feature flag** (`0x20000000`, reported by upstream `e2fsprogs` as `FEATURE_I29`). Any vanilla Linux kernel will refuse to mount volumes formatted by UGREEN OS:
+UGREEN's UGREEN OS is Debian 12 + a custom Linux 6.12.30+ kernel that injects **undocumented incompat feature flags** into both `ext4` and `btrfs` volumes. Any vanilla Linux kernel will refuse to mount volumes formatted by UGREEN OS:
 
+**ext4:**
 ```
 EXT4-fs (dm-X): Couldn't mount because of unsupported optional features (20000000)
+```
+
+**btrfs:**
+```
+BTRFS: unsupported feature bits found: 0x4000000000000000
 ```
 
 This is essentially vendor lock-in. 
 
 ### Why Hex-Editing the Superblock Fails
-If you try to clear the `0x20000000` bit manually with a hex editor, ext4's `metadata_csum` safety feature will catch it. The checksum becomes invalid, and `e2fsck` will fail:
+**ext4:** If you try to clear the `0x20000000` bit manually with a hex editor, ext4's `metadata_csum` safety feature will catch it. The checksum becomes invalid, and `e2fsck` will fail:
 ```
 ext2fs_open2: Superblock checksum does not match superblock
 ```
 
-## The Solution: Native Ext4 Patching
+**btrfs:** Similarly, BTRFS superblocks carry a CRC32C hash covering the entire 4 KiB block. Any raw edit to `incompat_flags` invalidates the checksum, and the kernel rejects the superblock entirely.
 
-Instead of the tedious process of booting a virtual machine (QEMU) with the proprietary kernel, we have created a **native, 100% safe Linux utility**. 
+## The Solution: Native Patching
 
-This repository patches the standard Linux `e2fsprogs` toolkit to recognize the `0x20000000` flag (which we've named `ugreen_proprietary`). We then use this patched `tune2fs` to strip the flag off your disks and correctly recalculate all ext4 CRC32c checksums, permanently converting your drive back into standard, mainline-compatible `ext4`.
+Instead of the tedious process of booting a virtual machine (QEMU) with the proprietary kernel, we have created **native, 100% safe Linux utilities** for both filesystems.
+
+### ext4
+We patch the standard Linux `e2fsprogs` toolkit to recognize the `0x20000000` flag (named `ugreen_proprietary`). The patched `tune2fs` strips the flag and correctly recalculates all ext4 CRC32c checksums, permanently converting your drive back into standard, mainline-compatible `ext4`.
+
+### btrfs
+We provide a standalone Python script (`patch_btrfs_ugos.py`) that directly manipulates the BTRFS superblocks. It clears the proprietary bit (`0x4000000000000000`), recalculates the CRC32C checksum, and writes the corrected superblock back to all mirror locations. Zero external dependencies — works with any Python 3 installation.
 
 ### 100% Safe Validation (Zero-Risk)
-We do not touch your real data immediately. Our `recover.sh` script utilizes Linux Device Mapper (dm-snapshot) to create a RAM-backed Copy-on-Write (COW) overlay. 
+We do not touch your real data immediately. Our `recover.sh` and `recover_btrfs.sh` scripts utilize Linux Device Mapper (dm-snapshot) to create a RAM-backed Copy-on-Write (COW) overlay.
 1. Reads come from your real disk.
 2. Writes (the metadata patch) go to a temporary file in `/var/tmp`.
 3. You get to mount the test volume and verify your files mathematically (`sha1sum`) before committing anything to the real disk!
@@ -59,7 +71,23 @@ The interactive script will:
 5. Safely clean up the snapshot.
 6. Ask for final confirmation before permanently fixing the real disk.
 
+### Step 4: BTRFS Recovery (if your pool is btrfs)
+If UGREEN OS formatted your pool as `btrfs`, use the Python-based recovery tool instead:
+
+```bash
+sudo ./scripts/recover_btrfs.sh /dev/mapper/<your-btrfs-volume>
+```
+
+The interactive script will:
+1. Verify the proprietary `0x4000000000000000` flag exists in all BTRFS superblock mirrors.
+2. Provision a temporary COW snapshot.
+3. Patch the snapshot's superblocks and recalculate CRC32C checksums.
+4. Mount the test snapshot for you to inspect.
+5. Safely clean up the snapshot.
+6. Ask for final confirmation before permanently fixing the real disk.
+
 ## Notes & Gotchas
 * **ugacl_vfs Warning:** Once mounted on standard Linux, you may see `ugacl_vfs request_module failed` in `dmesg`. This is just Linux ignoring UGREEN's proprietary Access Control List (ACL) tags and safely falling back to standard POSIX permissions. It does not affect data integrity.
+* **BTRFS Rollback:** The Python tool automatically backs up all valid superblock mirrors to a timestamped `.bin` file before patching. If anything goes wrong, you can restore with `dd` (see `PRD_UGREEN_OS_BTRFS_PATCH.md`).
 * **Firmware Images:** UGREEN firmware `.img` files are actually POSIX tar archives, not bootable ISOs. Never `dd` them to your NVMe.
-* **Post-Patch Verification:** You can use `./scripts/verify_hashes.sh` during the test phase to randomly hash 100 large files and compare them against your backups to prove mathematically that the ext4 layout is completely intact.
+* **Post-Patch Verification:** You can use `./scripts/verify_hashes.sh` during the test phase to randomly hash 100 large files and compare them against your backups to prove mathematically that the filesystem layout is completely intact.
