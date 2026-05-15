@@ -27,6 +27,12 @@ if [ ! -x "$TUNE2FS" ] || [ ! -x "$E2FSCK" ]; then
     exit 1
 fi
 
+if ! "$TUNE2FS" -l "$TARGET_DEV" 2>/dev/null | grep -q 'ugreen_proprietary'; then
+    echo "Error: $TARGET_DEV does not have the ugreen_proprietary flag set."
+    echo "Either this is not a UGOS volume, or it has already been patched."
+    exit 1
+fi
+
 COW_DIR="${COW_DIR:-/var/tmp}"
 if df --type=tmpfs /tmp >/dev/null 2>&1; then
     echo "Note: /tmp is tmpfs, using $COW_DIR for COW file"
@@ -56,7 +62,7 @@ cleanup() {
     echo "Teardown complete. Original disk ($TARGET_DEV) was untouched."
 }
 
-trap cleanup EXIT INT TERM
+trap cleanup EXIT INT TERM HUP
 
 echo "=== [1/5] Setting up COW Snapshot ==="
 echo "Target: $TARGET_DEV"
@@ -92,16 +98,29 @@ echo ""
 read -p "Press [Enter] when you are done inspecting to tear down the test environment..."
 
 # Call cleanup explicitly and disable the trap so it doesn't run again on normal exit
-trap - EXIT INT TERM
+trap - EXIT INT TERM HUP
 cleanup
 
 echo ""
 echo "=== Validation Complete ==="
 read -p "Did the test succeed? Are you ready to permanently patch $TARGET_DEV? (y/N) " confirm
 if [[ "$confirm" =~ ^[Yy]$ ]]; then
+    if findmnt -n "$TARGET_DEV" >/dev/null 2>&1; then
+        echo "Error: $TARGET_DEV is currently mounted. Unmount before patching." >&2
+        exit 1
+    fi
     echo "Permanently patching $TARGET_DEV..."
     "$TUNE2FS" -O ^ugreen_proprietary "$TARGET_DEV"
-    echo "Done! You can now natively mount $TARGET_DEV."
+    
+    echo "=== Verifying permanent patch ==="
+    if "$E2FSCK" -fn "$TARGET_DEV"; then
+        echo "Done! e2fsck reports clean filesystem."
+        echo "You can now natively mount $TARGET_DEV."
+    else
+        echo "WARNING: e2fsck reported errors after patching!" >&2
+        echo "Do NOT attempt to mount. Investigate before proceeding." >&2
+        exit 1
+    fi
 else
     echo "Aborted permanent patch."
 fi

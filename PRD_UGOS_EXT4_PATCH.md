@@ -92,6 +92,10 @@ This script uses the patch in `patches/0001-Recognize-ugreen_proprietary-incompa
 
 ### 5.2 User commands
 
+> **STOP.** Do not run these commands on a real device until you have validated
+> the patch using the COW snapshot method in Section 6. These commands modify
+> your filesystem permanently and irreversibly.
+
 Permanent fix (one-way):
 ```bash
 ./misc/tune2fs -O ^ugreen_proprietary /dev/mapper/<volume>

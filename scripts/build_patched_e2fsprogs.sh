@@ -39,7 +39,8 @@ if [ ! -d e2fsprogs ]; then
     git clone https://git.kernel.org/pub/scm/fs/ext2/e2fsprogs.git
 fi
 cd e2fsprogs
-git checkout v1.47.0 2>/dev/null || true
+E2FSPROGS_VERSION="v1.47.1"
+git checkout "$E2FSPROGS_VERSION"
 git reset --hard HEAD
 git clean -fdx
 
@@ -50,7 +51,11 @@ echo "Patched files:"
 git diff --stat
 
 echo "=== [4/5] Configure & build ==="
-./configure --prefix=/usr/local/e2fsprogs-ugos >/dev/null
+./configure --prefix=/usr/local/e2fsprogs-ugos >"$BUILD_DIR/configure.log" 2>&1 || {
+    echo "ERROR: configure failed. See $BUILD_DIR/configure.log" >&2
+    tail -n 20 "$BUILD_DIR/configure.log" >&2
+    exit 1
+}
 make -j"$(nproc)"
 
 echo "=== [5/5] Sanity check ==="
