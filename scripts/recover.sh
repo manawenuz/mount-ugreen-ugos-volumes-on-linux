@@ -27,7 +27,13 @@ if [ ! -x "$TUNE2FS" ] || [ ! -x "$E2FSCK" ]; then
     exit 1
 fi
 
-COW_IMG="/tmp/ugos_cow_writes_$$.img"
+COW_DIR="${COW_DIR:-/var/tmp}"
+if df --type=tmpfs /tmp >/dev/null 2>&1; then
+    echo "Note: /tmp is tmpfs, using $COW_DIR for COW file"
+else
+    COW_DIR="/tmp"
+fi
+COW_IMG="$COW_DIR/ugos_cow_writes_$$.img"
 SNAP_NAME="ugos_safe_test_$$"
 MOUNT_POINT="/mnt/recovery_test_$$"
 LOOP_DEV=""

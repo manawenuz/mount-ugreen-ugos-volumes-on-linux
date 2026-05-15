@@ -11,8 +11,9 @@
 
 set -euo pipefail
 
-PATCH="$(cd "$(dirname "$0")/.." && pwd)/patches/0001-Recognize-ugreen_proprietary-incompat-feature.patch"
-BUILD_DIR="$(pwd)/build"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PATCH="$REPO_ROOT/patches/0001-Recognize-ugreen_proprietary-incompat-feature.patch"
+BUILD_DIR="$REPO_ROOT/build"
 
 if [ ! -f "$PATCH" ]; then
     echo "ERROR: patch not found at $PATCH" >&2
@@ -35,9 +36,10 @@ echo "=== [2/5] Cloning e2fsprogs ==="
 mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 if [ ! -d e2fsprogs ]; then
-    git clone --depth 1 https://git.kernel.org/pub/scm/fs/ext2/e2fsprogs.git
+    git clone https://git.kernel.org/pub/scm/fs/ext2/e2fsprogs.git
 fi
 cd e2fsprogs
+git checkout v1.47.0 2>/dev/null || true
 git reset --hard HEAD
 git clean -fdx
 
@@ -58,10 +60,16 @@ else
     echo "  ✗ patch string missing in binary — build is broken" >&2
     exit 1
 fi
-echo ""
-echo "Built binaries:"
-ls -la misc/tune2fs misc/fuse2fs misc/e2image e2fsck/e2fsck 2>&1 \
-   | grep -v 'No such file' || true
+
+echo "Verifying all built binaries:"
+for bin in misc/tune2fs misc/fuse2fs misc/e2image e2fsck/e2fsck; do
+    if [ ! -x "$bin" ]; then
+        echo "  ✗ $bin missing" >&2
+        exit 1
+    fi
+    echo "  ✓ $bin"
+done
+
 echo ""
 echo "Run them directly from this build tree, e.g.:"
 echo "  $(pwd)/misc/tune2fs -O ^ugreen_proprietary /dev/mapper/<volume>"
